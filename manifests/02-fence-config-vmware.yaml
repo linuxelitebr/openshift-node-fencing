@@ -5,11 +5,11 @@
 apiVersion: v1
 kind: Secret
 metadata:
-  name: fence-agents-credentials-shared      # default name FAR looks for
+  name: fence-agents-credentials-shared         # default name FAR looks for
   namespace: openshift-workload-availability
 type: Opaque
 stringData:
-  "--username": "svc-fencing@vsphere.local"   # use a least-privilege VM-power account in prod
+  "--username": "svc-fencing@vsphere.local"     # use a least-privilege VM-power account in prod
   "--password": "<VCENTER_PASSWORD>"            # REDACTED - put your real vCenter password here
 ---
 apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
@@ -25,7 +25,7 @@ spec:
       sharedSecretName: fence-agents-credentials-shared
       sharedparameters:
         "--action": "off"                           # off (not reboot): a rebooting node re-grabs the RWO volume
-        "--ip": "vcenter.example.com"                     # vCenter FQDN/IP (single endpoint for all VMs)
+        "--ip": "vcenter.example.com"               # vCenter FQDN/IP (single endpoint for all VMs)
         "--api-path": "/rest"                       # vSphere 8: fence-agents 4.10 mis-parses /api; /rest works
         "--ssl-insecure": ""                        # vCenter self-signed cert
       nodeparameters:
