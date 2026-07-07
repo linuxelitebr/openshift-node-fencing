@@ -1,0 +1,49 @@
+# Workload Availability operators: NHC (detect) + FAR (fence) + SNR (watchdog fallback).
+# AllNamespaces install mode; one namespace, one OperatorGroup, three Subscriptions.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-workload-availability
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: workload-availability-operatorgroup
+  namespace: openshift-workload-availability
+spec: {}
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: node-healthcheck-operator
+  namespace: openshift-workload-availability
+spec:
+  channel: stable
+  name: node-healthcheck-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: fence-agents-remediation
+  namespace: openshift-workload-availability
+spec:
+  channel: stable
+  name: fence-agents-remediation
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: self-node-remediation
+  namespace: openshift-workload-availability
+spec:
+  channel: stable
+  name: self-node-remediation
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic

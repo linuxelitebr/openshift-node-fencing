@@ -1,0 +1,24 @@
+# Armed NHC -> SNR variant (the auto-detection demo). Uses the built-in SNR template so it
+# needs no BMC. duration is short (90s) for a quick lab; use 180s in production.
+apiVersion: remediation.medik8s.io/v1alpha1
+kind: NodeHealthCheck
+metadata:
+  name: nhc-snr
+spec:
+  minHealthy: "51%"
+  selector:
+    matchExpressions:
+      - key: node-role.kubernetes.io/worker
+        operator: Exists
+  unhealthyConditions:
+    - type: Ready
+      status: Unknown
+      duration: 90s
+    - type: Ready
+      status: "False"
+      duration: 90s
+  remediationTemplate:
+    apiVersion: self-node-remediation.medik8s.io/v1alpha1
+    kind: SelfNodeRemediationTemplate
+    name: self-node-remediation-automatic-strategy-template   # created by the SNR operator
+    namespace: openshift-workload-availability

@@ -1,0 +1,29 @@
+# NodeHealthCheck: detection + orchestration. This is the armed, hands-off config.
+# It watches worker nodes and, when one is unhealthy past `duration`, creates a
+# FenceAgentsRemediation from the template. minHealthy guards against fencing storms.
+#
+# NOTE on hosted/converged clusters: NHC will NOT fence a node carrying the
+# node-role.kubernetes.io/control-plane label (etcd-quorum guard), even if etcd is
+# external. Dedicated bare-metal workers (labeled `worker`) are fenced normally.
+apiVersion: remediation.medik8s.io/v1alpha1
+kind: NodeHealthCheck
+metadata:
+  name: nhc-workers
+spec:
+  minHealthy: "51%"                 # 3 nodes -> needs >=2 healthy -> at most 1 fenced at a time
+  selector:
+    matchExpressions:
+      - key: node-role.kubernetes.io/worker
+        operator: Exists            # workers only; never mix real control-plane nodes in here
+  unhealthyConditions:
+    - type: Ready
+      status: Unknown               # kubelet stopped reporting = the hardware/hung-node case
+      duration: 180s                # main tuning lever; below ~60-90s risks fencing on a transient blip
+    - type: Ready
+      status: "False"
+      duration: 180s
+  remediationTemplate:
+    apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
+    kind: FenceAgentsRemediationTemplate
+    name: fartemplate-vmware        # swap to fartemplate-redfish for iDRAC
+    namespace: openshift-workload-availability

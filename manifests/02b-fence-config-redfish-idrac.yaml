@@ -1,0 +1,38 @@
+# Fence config for real bare-metal Dell/iDRAC (the production target). Same operators,
+# same OutOfServiceTaint, different agent: fence_redfish over HTTPS to each node's iDRAC.
+# Redfish is on by default on iDRAC 8/9; IPMI-over-LAN often is not, so prefer Redfish.
+#
+# VMware vs Dell difference: vCenter is ONE endpoint + per-node --plug (VM name);
+# real Dell is per-node --ip (each iDRAC has its own address). The Redfish Systems URI
+# is constant across Dell nodes, so it goes in sharedparameters.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fence-agents-credentials-shared
+  namespace: openshift-workload-availability
+type: Opaque
+stringData:
+  "--username": "fencing"                     # dedicated iDRAC account with power privilege
+  "--password": "<IDRAC_PASSWORD>"            # REDACTED
+---
+apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
+kind: FenceAgentsRemediationTemplate
+metadata:
+  name: fartemplate-redfish
+  namespace: openshift-workload-availability
+spec:
+  template:
+    spec:
+      agent: fence_redfish
+      remediationStrategy: OutOfServiceTaint
+      sharedSecretName: fence-agents-credentials-shared
+      sharedparameters:
+        "--action": "off"                           # off isolates a flapping/faulty node; switch from reboot if it flaps
+        "--systems-uri": "/redfish/v1/Systems/System.Embedded.1"   # Dell constant
+        "--ssl-insecure": ""                        # iDRAC self-signed cert
+      nodeparameters:
+        "--ip":                                     # per-node iDRAC address
+          worker-0.example.com: "10.10.0.10"
+          worker-1.example.com: "10.10.0.11"
+          worker-2.example.com: "10.10.0.12"

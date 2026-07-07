@@ -1,0 +1,33 @@
+# On-demand remediation objects (handoff section 7.2). Use these to test the fence path
+# by hand, WITHOUT arming NHC. Create one, watch the node get fenced, then delete it.
+# metadata.name MUST equal the node name to fence.
+#
+# ---- Option A: FAR (real power-off via BMC/vCenter) ----
+# This is the one that powered node-10 off through vCenter and recovered a pod in ~37s.
+apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
+kind: FenceAgentsRemediation
+metadata:
+  name: worker-0.example.com
+  namespace: openshift-workload-availability
+spec:
+  agent: fence_vmware_rest
+  remediationStrategy: OutOfServiceTaint
+  sharedSecretName: fence-agents-credentials-shared
+  sharedparameters:
+    "--action": "off"
+    "--ip": "vcenter.example.com"
+    "--api-path": "/rest"
+    "--ssl-insecure": ""
+  nodeparameters:
+    "--plug":
+      worker-0.example.com: "worker-0"
+---
+# ---- Option B: SNR (watchdog reboot, no BMC needed) ----
+# strategy: OutOfServiceTaint = same force-detach; the node reboots itself via softdog.
+apiVersion: self-node-remediation.medik8s.io/v1alpha1
+kind: SelfNodeRemediation
+metadata:
+  name: worker-0.example.com
+  namespace: openshift-workload-availability
+spec:
+  remediationStrategy: OutOfServiceTaint

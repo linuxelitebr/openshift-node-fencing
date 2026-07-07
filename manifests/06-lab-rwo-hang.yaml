@@ -1,0 +1,72 @@
+# Lab workload to reproduce and measure the RWO hang.
+# victim  = holds a RWO Ceph volume on node-10 (nodeName pins it there).
+# claimant = wants the SAME volume from node-11; it blocks with Multi-Attach until
+#            node-10 is truly fenced and the volume force-detaches.
+# Fence node-10 (with 04-manual-remediation.yaml) and time when claimant goes Running.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fencing-lab
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+  namespace: fencing-lab
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ceph-rbd
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: victim
+  namespace: fencing-lab
+  labels: { role: victim }
+spec:
+  nodeName: worker-0.example.com
+  terminationGracePeriodSeconds: 0
+  tolerations:
+    - key: node.kubernetes.io/unschedulable
+      operator: Exists
+      effect: NoSchedule
+  containers:
+    - name: hb
+      image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+      command: ["/bin/sh","-c"]
+      args:
+        - |
+          echo "victim boot $(date -u +%FT%TZ) on $(hostname)" >> /data/heartbeat;
+          while true; do echo "alive $(date -u +%FT%TZ)" >> /data/heartbeat; sleep 5; done
+      volumeMounts:
+        - { name: data, mountPath: /data }
+  volumes:
+    - name: data
+      persistentVolumeClaim: { claimName: data }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: claimant
+  namespace: fencing-lab
+  labels: { role: claimant }
+spec:
+  nodeName: worker-1.example.com
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: hb
+      image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+      command: ["/bin/sh","-c"]
+      args:
+        - |
+          echo "claimant MOUNTED $(date -u +%FT%TZ) on $(hostname)" >> /data/heartbeat;
+          sleep 3600
+      volumeMounts:
+        - { name: data, mountPath: /data }
+  volumes:
+    - name: data
+      persistentVolumeClaim: { claimName: data }

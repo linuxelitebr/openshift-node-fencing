@@ -1,0 +1,35 @@
+# Fence config for the VMware lab: Secret + FenceAgentsRemediationTemplate (fence_vmware_rest).
+# The Secret holds ONLY the credential params. Any parameter that appears in the Secret must
+# NOT also appear in sharedparameters/nodeparameters, or FAR rejects the config as a duplicate.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fence-agents-credentials-shared      # default name FAR looks for
+  namespace: openshift-workload-availability
+type: Opaque
+stringData:
+  "--username": "svc-fencing@vsphere.local"   # use a least-privilege VM-power account in prod
+  "--password": "<VCENTER_PASSWORD>"            # REDACTED - put your real vCenter password here
+---
+apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
+kind: FenceAgentsRemediationTemplate
+metadata:
+  name: fartemplate-vmware
+  namespace: openshift-workload-availability
+spec:
+  template:
+    spec:
+      agent: fence_vmware_rest
+      remediationStrategy: OutOfServiceTaint        # force-detach RWO from the fenced node
+      sharedSecretName: fence-agents-credentials-shared
+      sharedparameters:
+        "--action": "off"                           # off (not reboot): a rebooting node re-grabs the RWO volume
+        "--ip": "vcenter.example.com"                     # vCenter FQDN/IP (single endpoint for all VMs)
+        "--api-path": "/rest"                       # vSphere 8: fence-agents 4.10 mis-parses /api; /rest works
+        "--ssl-insecure": ""                        # vCenter self-signed cert
+      nodeparameters:
+        "--plug":                                   # node name -> vCenter VM name (from `-o list`)
+          worker-0.example.com: "worker-0"
+          worker-1.example.com: "worker-1"
+          worker-2.example.com: "worker-2"
