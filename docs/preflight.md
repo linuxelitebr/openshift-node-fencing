@@ -5,8 +5,8 @@ to bottom before applying `manifests/02-*`. Each section says what you should se
 something else, stop and fix it, because every item below is a way fencing fails silently on the
 day you need it.
 
-Outputs shown are real, from a hosted cluster with three bare-metal Dell workers and from the
-vSphere lab, with names, IPs and service tags replaced.
+Outputs shown are real, from a hosted cluster with three bare-metal Dell workers (and, for the
+vSphere variant at the end, from a lab), with names, IPs and service tags replaced.
 
 Three rules for the commands that need a password:
 
@@ -279,9 +279,10 @@ printf 'ip=10.10.0.10\nusername=%s\npassword=%s\nssl_insecure=1\nsystems_uri=/re
 Status: ON
 ```
 
-### vSphere variant
+### vSphere variant (lab only)
 
-Same Secret one-liner with the vCenter account (`--from-literal=--username=svc-fencing@vsphere.local`). List
+For a lab whose workers are vSphere VMs, with the files in `lab/vmware/`. Same Secret one-liner
+with the vCenter account (`--from-literal=--username=svc-fencing@vsphere.local`). List
 the VM names that go into `--plug`, then check one, both read-only:
 
 ```bash

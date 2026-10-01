@@ -1,6 +1,7 @@
-# FAR template for worker nodes that are vSphere VMs (fence_vmware_rest through vCenter).
-# This is the path the lab used. Same rules as the Redfish template: the Secret is created by
-# command (docs/preflight.md), never stored in git, and its keys never repeat below.
+# LAB ONLY: FAR template for clusters whose worker nodes are vSphere VMs (fence_vmware_rest
+# through vCenter). The production path is manifests/02-fartemplate-redfish.yaml.
+# Same rules as the Redfish template: the Secret is created by command (docs/preflight.md,
+# vSphere variant), never stored in git, and its keys never repeat below.
 #
 # vCenter is ONE endpoint for every node, so --ip is shared and --plug maps node -> VM name.
 # Get the VM names with: fence_vmware_rest ... -o list  (see docs/preflight.md)

@@ -7,50 +7,59 @@ The short version: when a node running VMs hangs or dies, the VMs do not come ba
 Kubernetes cannot prove the node let go of its pods and volumes, so it waits. With an RWO volume
 the new pod sits in `Multi-Attach error`; in my lab it never cleared until the dead node came
 back. RWX does not save you either: the VM's old pod stays on the dead node, and the pod garbage
-collector force-deletes the pods of a dead node only when the node is NotReady **and** carries the
+collector force-deletes the pods of a dead node only when the node is NotReady and carries the
 `out-of-service` taint (or when someone deletes the Node object).
 
-The fix is three pieces from Red Hat's Workload Availability operators and one taint:
-NodeHealthCheck (NHC) notices the node is gone, Fence Agents Remediation (FAR) powers it off
-through its BMC, and the `node.kubernetes.io/out-of-service` taint releases the pods and
-volumes, so the VMs restart somewhere healthy.
+The fix is two of Red Hat's Workload Availability operators and one taint: Node Health Check
+(NHC) notices the node is gone, Fence Agents Remediation (FAR) powers it off through its BMC, and
+the `node.kubernetes.io/out-of-service` taint releases the pods and volumes, so the VMs restart
+somewhere healthy.
+
+The manifests in `manifests/` are for bare-metal Dell servers, fenced through the iDRAC over
+Redfish. That is the setup that ran on real hardware. Other Redfish BMCs need their own
+`--systems-uri`.
 
 What I measured:
 
 | Where | Storage | Result |
 | --- | --- | --- |
-| Lab: hosted cluster, workers are vSphere VMs | external Ceph RBD, RWO | fence to workload running elsewhere in 37 s |
-| Customer: hosted cluster, bare-metal Dell workers | RWX block and filesystem | manual fence to all 4 VMs `Running` on other nodes in 79 to 120 s, including a 20 s FAR leader handover |
-| Same customer, automatic path (NHC armed, `duration: 300s`) | | not measured yet; by the numbers above, about 6.5 to 7 minutes, mostly the `duration` |
+| Customer: hosted cluster, three bare-metal Dell workers | RWX block and filesystem | manual fence to 4 of 4 VMs `Running` on other nodes in 79 to 120 s, including a 20 s FAR leader handover |
+| Same customer, automatic path (NHC armed, `duration: 300s`) | | not measured yet; by the numbers above, about 6.5 to 7.5 minutes, mostly the `duration` |
+| Lab: hosted cluster, external Ceph RBD | RWO | fence to a test pod mounting the volume on another node in 37 s (a pod, not a VM) |
 
 Versions: OpenShift 4.21, NHC 0.11.0, FAR 0.7.0, fence-agents 4.10.
 
 ## Order of work
 
-Every step has a gate. Do not move on until it passes.
+Every node name, BMC IP and account in these files is an example. Edit them before you apply
+anything. Every step has a gate; do not move on until it passes.
 
 | Step | What | Gate |
 | --- | --- | --- |
 | 0 | [`docs/preflight.md`](docs/preflight.md) sections 1 to 9 | every check as described there |
 | 1 | `manifests/01-operators.yaml`, or OperatorHub (pick the tiles marked **Red Hat**) | CSVs `Succeeded`, subscriptions from `redhat-operators` |
-| 2 | Secret ([preflight 10](docs/preflight.md#10-create-the-credential-secret-then-test-what-is-inside-it)), then `manifests/02-fartemplate-redfish.yaml` (or `-vmware`) | no empty Secret value; `status` with the Secret's own values says `ON` |
-| 3 | Drill: `manifests/03-drill-far-redfish.yaml` on one node, in a window | node powers off, its VMs come back elsewhere; then power on, wait for `Ready`, delete the CR |
+| 2 | Secret ([preflight 10](docs/preflight.md#10-create-the-credential-secret-then-test-what-is-inside-it)), then `manifests/02-fartemplate-redfish.yaml` | no empty Secret value; `status` with the Secret's own values says `ON` |
+| 3 | Drill on one node: [`docs/drill.md`](docs/drill.md) with `manifests/03-drill-far-redfish.yaml` | node powers off, its VMs come back elsewhere; then power on, wait for `Ready`, delete the CR |
 | 4 | `manifests/04-nodehealthcheck.yaml` | `oc get nodehealthcheck` says `Enabled` |
 
-The NodeHealthCheck goes **last** on purpose. Nothing before it fires on its own. If you install
+The NodeHealthCheck goes last on purpose. Nothing before it fires on its own. If you install
 the operators from the console, skip `01`: the console already created an OperatorGroup, and two
 OperatorGroups in one namespace break OLM.
 
 The credential Secret is not in this repo and never should be. Create it with the one-liner in the
 preflight.
 
+VMs must use `runStrategy: RerunOnFailure`. `Always` also comes back after a fence, but it also
+restarts the VM after every shutdown from inside the guest. `Manual` and `Halted` stay down.
+
 ## Cluster updates and planned maintenance
 
-**OpenShift updates: NHC postpones remediation on its own.** It checks two signals: a
-ClusterVersion with `Progressing=True` (postpones everything), and a node whose
-`machineconfiguration.openshift.io/currentConfig` differs from `desiredConfig` (postpones that
-node). MCO rollouts set those annotations, and so do HyperShift `InPlace` NodePool updates, only
-on the nodes being updated, until each one is back. A slow Dell POST during an update is fine.
+**ClusterVersion updates, MCO rollouts and `InPlace` NodePool updates: NHC postpones remediation
+on its own.** It checks two signals: a ClusterVersion with `Progressing=True` (postpones
+everything), and a node whose `machineconfiguration.openshift.io/currentConfig` differs from
+`desiredConfig` (postpones that node). MCO rollouts set those annotations, and so do HyperShift
+`InPlace` NodePool updates, only on the nodes being updated, until each one is back. A slow Dell
+POST during an update is fine.
 
 **Pause it yourself for everything else:** NodePool updates of type `Replace`, firmware updates
 through the BMC, hardware work, manual reboots. Otherwise a node NotReady longer than `duration`
@@ -82,6 +91,8 @@ These reproduce the experiments in the post. They are not part of the production
 | `lab/snr-operator.yaml` | Self Node Remediation, only for the two SNR experiments (read its header first) |
 | `lab/snr-manual-remediation.yaml` | SNR reboot of one node, the run where the node re-claimed its own volume |
 | `lab/nodehealthcheck-snr.yaml` | NHC pointing at SNR, the run where NHC refused to fence a `control-plane`-labeled worker |
+| `lab/vmware/fartemplate-vmware.yaml` | FAR template for a lab whose workers are vSphere VMs (`fence_vmware_rest` through vCenter) |
+| `lab/vmware/drill-far-vmware.yaml` | the drill CR for that vSphere lab |
 
 Self Node Remediation is left out of the production manifests on purpose. Its agent reboots a
 node it believes is isolated even when no NodeHealthCheck points at it, it must not run on
@@ -94,7 +105,7 @@ The post has the full troubleshooting section. The short list:
 
 - **Defaults that bite.** FAR's `remediationStrategy` defaults to `ResourceDeletion` (no taint),
   `fence_redfish` defaults to `reboot`, verifies the BMC certificate, and has no default
-  `--systems-uri`. The templates set all four on purpose.
+  `--systems-uri`. The template sets all four on purpose.
 - **An empty Secret value fails with the wrong error.** FAR passes the parameter without a value
   and the agent swallows the next argument: an empty password shows up as
   `You have to set login name`.
@@ -109,11 +120,11 @@ The post has the full troubleshooting section. The short list:
   CIDR entries there; the agent does not.
 - **Map nodes to BMCs by service tag**, not by naming convention. A wrong map powers off a healthy
   node.
-- **Hosted clusters:** NodePool `autoRepair` must stay `false`; the operators run on the same
+- **Hosted clusters:** keep NodePool `autoRepair: false` with FAR; the operators run on the same
   workers you fence, so the FAR leader can die with the node (it recovered by itself in 20 s);
   the NodePool lives on the management cluster while NHC and FAR live in the hosted one.
-- **vSphere 8:** `--api-path=/rest`. And a login that "stops working" after retries is usually a
-  lockout.
+- **In a vSphere lab:** `--api-path=/rest` on vSphere 8, and a login that "stops working" after
+  retries is usually a lockout.
 
 Find the FAR leader pod and its node:
 

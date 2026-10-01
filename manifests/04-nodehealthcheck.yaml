@@ -33,5 +33,5 @@ spec:
   remediationTemplate:
     apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
     kind: FenceAgentsRemediationTemplate
-    name: fartemplate-redfish       # fartemplate-vmware for vSphere VMs
+    name: fartemplate-redfish       # lab/vmware/ has a vSphere template for lab clusters
     namespace: openshift-workload-availability

@@ -2,8 +2,9 @@
 # victim   = holds an RWO Ceph RBD volume on worker-0 (nodeName pins it there).
 # claimant = wants the SAME volume from worker-1; it blocks with Multi-Attach until worker-0 is
 #            really fenced and the volume is force-detached.
-# Kill worker-0 (stop kubelet and crio, or pull the power), then fence it with
-# manifests/03-drill-far-vmware.yaml (or the Redfish one) and time when claimant goes Running.
+# Kill worker-0 (stop kubelet and crio, or pull the power), then fence it with the drill CR
+# (manifests/03-drill-far-redfish.yaml, or lab/vmware/drill-far-vmware.yaml in a vSphere lab)
+# and time when claimant goes Running.
 ---
 apiVersion: v1
 kind: Namespace

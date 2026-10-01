@@ -1,5 +1,6 @@
-# DRILL (vSphere variant): powers off ONE node VM right now through vCenter.
-# This is the CR that powered a lab node off and recovered an RWO workload in ~37s.
+# LAB ONLY. DRILL (vSphere variant): powers off ONE node VM right now through vCenter.
+# This is the CR that powered a lab node off; an RWO test pod mounted the volume on another
+# node ~37s later.
 # metadata.name must be exactly the node name. Same after-drill order: power on, wait for
 # Ready, then delete the CR (that is when FAR removes the out-of-service taint).
 apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
