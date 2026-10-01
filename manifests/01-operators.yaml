@@ -1,9 +1,18 @@
-# Workload Availability operators: NHC (detect) + FAR (fence) + SNR (watchdog fallback).
-# AllNamespaces install mode; one namespace, one OperatorGroup, three Subscriptions.
+# Workload Availability operators: Node Health Check (detect) + Fence Agents Remediation (fence).
+# AllNamespaces install mode: one namespace, one OperatorGroup, two Subscriptions.
+#
+# source: redhat-operators matters. The community catalog ships packages with the SAME names
+# (and newer versions). OperatorHub shows both tiles side by side. Pick the Red Hat one.
+#
+# Self Node Remediation is NOT installed here on purpose. Its agent reboots nodes on its own
+# isolation logic even when no NodeHealthCheck points at it. Install it only when you have a
+# reason to use it (see lab/snr-operator.yaml and the README).
 apiVersion: v1
 kind: Namespace
 metadata:
   name: openshift-workload-availability
+  annotations:
+    openshift.io/node-selector: ""      # suggested by the operators' CSV
 ---
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
@@ -22,7 +31,7 @@ spec:
   name: node-healthcheck-operator
   source: redhat-operators
   sourceNamespace: openshift-marketplace
-  installPlanApproval: Automatic
+  installPlanApproval: Automatic        # Manual is safer in prod: an operator update can change defaults
 ---
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
@@ -32,18 +41,6 @@ metadata:
 spec:
   channel: stable
   name: fence-agents-remediation
-  source: redhat-operators
-  sourceNamespace: openshift-marketplace
-  installPlanApproval: Automatic
----
-apiVersion: operators.coreos.com/v1alpha1
-kind: Subscription
-metadata:
-  name: self-node-remediation
-  namespace: openshift-workload-availability
-spec:
-  channel: stable
-  name: self-node-remediation
   source: redhat-operators
   sourceNamespace: openshift-marketplace
   installPlanApproval: Automatic

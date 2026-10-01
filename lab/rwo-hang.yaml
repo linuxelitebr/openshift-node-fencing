@@ -1,8 +1,9 @@
 # Lab workload to reproduce and measure the RWO hang.
-# victim  = holds a RWO Ceph volume on node-10 (nodeName pins it there).
-# claimant = wants the SAME volume from node-11; it blocks with Multi-Attach until
-#            node-10 is truly fenced and the volume force-detaches.
-# Fence node-10 (with 04-manual-remediation.yaml) and time when claimant goes Running.
+# victim   = holds an RWO Ceph RBD volume on worker-0 (nodeName pins it there).
+# claimant = wants the SAME volume from worker-1; it blocks with Multi-Attach until worker-0 is
+#            really fenced and the volume is force-detached.
+# Kill worker-0 (stop kubelet and crio, or pull the power), then fence it with
+# manifests/03-drill-far-vmware.yaml (or the Redfish one) and time when claimant goes Running.
 ---
 apiVersion: v1
 kind: Namespace

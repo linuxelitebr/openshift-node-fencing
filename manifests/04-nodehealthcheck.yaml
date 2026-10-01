@@ -1,0 +1,37 @@
+# ARMS automatic remediation. Apply this LAST, only after a manual drill (03) powered a node
+# off and its VMs came back elsewhere. From here on, a worker NotReady for `duration` gets
+# powered off by its BMC.
+#
+# NHC postpones on its own during OpenShift updates: ClusterVersion Progressing, or a node whose
+# currentConfig != desiredConfig annotation (MCO rollouts, and HyperShift InPlace NodePool
+# updates). Firmware updates, hardware work and manual reboots are NOT detected: set
+# spec.pauseRequests before them (see README).
+#
+# Hosted clusters: if the NodePool has autoRepair: true, a MachineHealthCheck on the management
+# cluster also remediates these nodes (16 min on Agent/None platforms, by replacing the Machine).
+# Two remediators on one node is the thing to avoid. Keep autoRepair: false with FAR.
+apiVersion: remediation.medik8s.io/v1alpha1
+kind: NodeHealthCheck
+metadata:
+  name: nhc-workers-far
+spec:
+  selector:
+    matchExpressions:
+      - key: node-role.kubernetes.io/worker
+        operator: Exists            # workers only; never mix control-plane nodes into the same NHC
+  minHealthy: "51%"                 # rounds UP: with 3 nodes it needs 2 healthy -> at most 1 fenced at a time
+  # Large clusters: use a small absolute maxUnhealthy instead (mutually exclusive with minHealthy).
+  # With 40 nodes, 51% lets NHC fence 19 at once; a top-of-rack switch failure is not a hardware failure.
+  # maxUnhealthy: 2
+  unhealthyConditions:
+    - type: Ready
+      status: "False"
+      duration: 300s                # main tuning lever. NHC default; also the default toleration after which
+    - type: Ready                   # Kubernetes evicts pods from a not-ready node. Go lower only with data.
+      status: Unknown
+      duration: 300s
+  remediationTemplate:
+    apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
+    kind: FenceAgentsRemediationTemplate
+    name: fartemplate-redfish       # fartemplate-vmware for vSphere VMs
+    namespace: openshift-workload-availability

@@ -1,0 +1,12 @@
+# Lab: trigger SNR on one node by hand (needs lab/snr-operator.yaml).
+# The node reboots itself through its watchdog; strategy OutOfServiceTaint does the same
+# force-detach FAR does. This is the experiment where a fast-rebooting node came back mid-failover
+# and re-claimed its own RWO volume, which is why the FAR templates use --action off.
+# metadata.name must be exactly the node name.
+apiVersion: self-node-remediation.medik8s.io/v1alpha1
+kind: SelfNodeRemediation
+metadata:
+  name: worker-0.example.com
+  namespace: openshift-workload-availability
+spec:
+  remediationStrategy: OutOfServiceTaint

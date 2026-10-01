@@ -1,0 +1,27 @@
+# DRILL: powers off ONE node right now (Redfish ForceOff). Apply only in an agreed window,
+# after the preflight passed, on a node whose VMs the other nodes can absorb.
+#
+# metadata.name must be exactly the node name. The FAR CR is self-contained (it does not read
+# the template), so it repeats the template parameters for that single node.
+#
+# After the drill: power the node back on (docs/preflight.md), wait for Ready, THEN delete this
+# CR. FAR removes the out-of-service taint only when the CR is deleted.
+apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
+kind: FenceAgentsRemediation
+metadata:
+  name: worker-0.example.com
+  namespace: openshift-workload-availability
+spec:
+  agent: fence_redfish
+  remediationStrategy: OutOfServiceTaint
+  sharedSecretName: fence-agents-credentials-shared
+  retrycount: 5
+  retryinterval: 5s
+  timeout: 60s
+  sharedparameters:
+    "--action": "off"
+    "--systems-uri": "/redfish/v1/Systems/System.Embedded.1"
+    "--ssl-insecure": ""
+  nodeparameters:
+    "--ip":
+      worker-0.example.com: "10.10.0.10"

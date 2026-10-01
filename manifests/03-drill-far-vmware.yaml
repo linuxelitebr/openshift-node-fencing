@@ -1,0 +1,24 @@
+# DRILL (vSphere variant): powers off ONE node VM right now through vCenter.
+# This is the CR that powered a lab node off and recovered an RWO workload in ~37s.
+# metadata.name must be exactly the node name. Same after-drill order: power on, wait for
+# Ready, then delete the CR (that is when FAR removes the out-of-service taint).
+apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
+kind: FenceAgentsRemediation
+metadata:
+  name: worker-0.example.com
+  namespace: openshift-workload-availability
+spec:
+  agent: fence_vmware_rest
+  remediationStrategy: OutOfServiceTaint
+  sharedSecretName: fence-agents-credentials-shared
+  retrycount: 5
+  retryinterval: 5s
+  timeout: 60s
+  sharedparameters:
+    "--action": "off"
+    "--ip": "vcenter.example.com"
+    "--api-path": "/rest"
+    "--ssl-insecure": ""
+  nodeparameters:
+    "--plug":
+      worker-0.example.com: "worker-0"

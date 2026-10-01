@@ -1,5 +1,7 @@
-# Armed NHC -> SNR variant (the auto-detection demo). Uses the built-in SNR template so it
-# needs no BMC. duration is short (90s) for a quick lab; use 180s in production.
+# Lab: armed NHC pointing at SNR, for the auto-detection experiment (needs lab/snr-operator.yaml).
+# duration is short (90s) so the lab does not take all afternoon. Do not copy that to production.
+# In the lab this NHC detected the dead node and then REFUSED to remediate it, because the worker
+# carried the node-role.kubernetes.io/control-plane label (etcd quorum guard).
 apiVersion: remediation.medik8s.io/v1alpha1
 kind: NodeHealthCheck
 metadata:

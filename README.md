@@ -1,82 +1,130 @@
 # OpenShift Virtualization node fencing
 
-Companion manifests for the post *"Kill a Node in OpenShift Virtualization and the VM
-Never Comes Back. Here's the Fence That Fixes It."* on [linuxelite.com.br](https://linuxelite.com.br).
+Companion repo for the post
+[Kill a Node in OpenShift Virtualization and the VM Never Comes Back. Here's the Fence That Fixes It](https://linuxelite.com.br/blog/openshift-virtualization-node-fencing/).
 
-The short version: when a bare-metal node running OpenShift Virtualization dies, your VMs
-do not come back on their own. A `ReadWriteOnce` volume cannot move until the cluster is
-certain the dead node let go of it, and without fencing there is no such certainty, so it
-waits. On OpenShift 4.21 it waits forever. This repo is the fix: three Red Hat Workload
-Availability operators wired to detect a dead node, power it off for real, and force the
-volume loose so the VM restarts somewhere healthy.
+The short version: when a node running VMs hangs or dies, the VMs do not come back on their own.
+Kubernetes cannot prove the node let go of its pods and volumes, so it waits. With an RWO volume
+the new pod sits in `Multi-Attach error`; in my lab it never cleared until the dead node came
+back. RWX does not save you either: the VM's old pod stays on the dead node, and the pod garbage
+collector force-deletes the pods of a dead node only when the node is NotReady **and** carries the
+`out-of-service` taint (or when someone deletes the Node object).
 
-Every file is `oc apply -f` ready. Replace the redacted passwords and the node, VM, and IP
-names with your own. Nothing here is a custom controller. It is operators, a Secret, a
-template, and a health check.
+The fix is three pieces from Red Hat's Workload Availability operators and one taint:
+NodeHealthCheck (NHC) notices the node is gone, Fence Agents Remediation (FAR) powers it off
+through its BMC, and the `node.kubernetes.io/out-of-service` taint releases the pods and
+volumes, so the VMs restart somewhere healthy.
 
-## What you deploy
+What I measured:
 
-Apply these in order. Wait for the three CSVs to reach `Succeeded` after step 1.
+| Where | Storage | Result |
+| --- | --- | --- |
+| Lab: hosted cluster, workers are vSphere VMs | external Ceph RBD, RWO | fence to workload running elsewhere in 37 s |
+| Customer: hosted cluster, bare-metal Dell workers | RWX block and filesystem | manual fence to all 4 VMs `Running` on other nodes in 79 to 120 s, including a 20 s FAR leader handover |
+| Same customer, automatic path (NHC armed, `duration: 300s`) | | not measured yet; by the numbers above, about 6.5 to 7 minutes, mostly the `duration` |
 
+Versions: OpenShift 4.21, NHC 0.11.0, FAR 0.7.0, fence-agents 4.10.
 
-| File | What it is |
-| --- | --- |
-| `manifests/01-operators.yaml` | Namespace, OperatorGroup, and subscriptions for NHC, FAR, and SNR. |
-| `manifests/02-fence-config-vmware.yaml` | Secret plus FAR template for a vSphere lab (`fence_vmware_rest`). |
-| `manifests/02b-fence-config-redfish-idrac.yaml` | Same, for real Dell iDRAC (`fence_redfish`). Pick one. |
-| `manifests/03-nodehealthcheck.yaml` | The armed NodeHealthCheck. This is the hands-off production piece. |
+## Order of work
 
+Every step has a gate. Do not move on until it passes.
 
-## What you use to test and measure
+| Step | What | Gate |
+| --- | --- | --- |
+| 0 | [`docs/preflight.md`](docs/preflight.md) sections 1 to 9 | every check as described there |
+| 1 | `manifests/01-operators.yaml`, or OperatorHub (pick the tiles marked **Red Hat**) | CSVs `Succeeded`, subscriptions from `redhat-operators` |
+| 2 | Secret ([preflight 10](docs/preflight.md#10-create-the-credential-secret-then-test-what-is-inside-it)), then `manifests/02-fartemplate-redfish.yaml` (or `-vmware`) | no empty Secret value; `status` with the Secret's own values says `ON` |
+| 3 | Drill: `manifests/03-drill-far-redfish.yaml` on one node, in a window | node powers off, its VMs come back elsewhere; then power on, wait for `Ready`, delete the CR |
+| 4 | `manifests/04-nodehealthcheck.yaml` | `oc get nodehealthcheck` says `Enabled` |
 
+The NodeHealthCheck goes **last** on purpose. Nothing before it fires on its own. If you install
+the operators from the console, skip `01`: the console already created an OperatorGroup, and two
+OperatorGroups in one namespace break OLM.
 
-| File | What it is |
-| --- | --- |
-| `manifests/04-manual-remediation.yaml` | Fence one node on demand, without arming NHC. A FAR CR (real power-off) or an SNR CR (watchdog). |
-| `manifests/05-nodehealthcheck-snr.yaml` | Armed NHC pointed at SNR, for the auto-detection demo with no BMC. |
-| `manifests/06-lab-rwo-hang.yaml` | Two pods fighting over one RWO volume, to reproduce the Multi-Attach hang. |
-| `manifests/07-lab-runstrategy-vms.yaml` | Three fedora VMs, one per `runStrategy`, to see which one a fence brings back. |
+The credential Secret is not in this repo and never should be. Create it with the one-liner in the
+preflight.
 
+## Cluster updates and planned maintenance
 
-## The commands that are not YAML
+**OpenShift updates: NHC postpones remediation on its own.** It checks two signals: a
+ClusterVersion with `Progressing=True` (postpones everything), and a node whose
+`machineconfiguration.openshift.io/currentConfig` differs from `desiredConfig` (postpones that
+node). MCO rollouts set those annotations, and so do HyperShift `InPlace` NodePool updates, only
+on the nodes being updated, until each one is back. A slow Dell POST during an update is fine.
 
-Always validate the fence agent read-only before you let it near a power button. This
-queries power state and changes nothing:
+**Pause it yourself for everything else:** NodePool updates of type `Replace`, firmware updates
+through the BMC, hardware work, manual reboots. Otherwise a node NotReady longer than `duration`
+gets powered off mid-job.
 
-```sh
-oc exec -n openshift-workload-availability <far-pod> -i -- fence_vmware_rest <<EOF
-ip=vcenter.example.com
-username=svc-fencing@vsphere.local
-password=<VCENTER_PASSWORD>
-ssl_insecure=1
-api_path=/rest
-plug=worker-0
-action=status
-EOF
+```bash
+oc patch nodehealthcheck nhc-workers-far --type merge -p '{"spec":{"pauseRequests":["planned-maintenance"]}}'
 ```
 
-FAR with `--action off` leaves the node powered off on purpose, so you bring it back by
-hand. Same block, `action=on`.
+```bash
+oc patch nodehealthcheck nhc-workers-far --type json -p '[{"op":"remove","path":"/spec/pauseRequests"}]'
+```
+
+A pause blocks new remediations. A fence already in flight keeps going. While NHC postpones for
+an update, its `status.phase` still says `Enabled`; the sign is an event:
+
+```bash
+oc get events -n default --field-selector reason=RemediationSkipped
+```
+
+## The lab files
+
+These reproduce the experiments in the post. They are not part of the production setup.
+
+| File | Experiment |
+| --- | --- |
+| `lab/rwo-hang.yaml` | two pods fighting over one RWO volume, to watch the `Multi-Attach` hang |
+| `lab/runstrategy-vms.yaml` | three VMs, one per `runStrategy`, to see which one a fence brings back |
+| `lab/snr-operator.yaml` | Self Node Remediation, only for the two SNR experiments (read its header first) |
+| `lab/snr-manual-remediation.yaml` | SNR reboot of one node, the run where the node re-claimed its own volume |
+| `lab/nodehealthcheck-snr.yaml` | NHC pointing at SNR, the run where NHC refused to fence a `control-plane`-labeled worker |
+
+Self Node Remediation is left out of the production manifests on purpose. Its agent reboots a
+node it believes is isolated even when no NodeHealthCheck points at it, it must not run on
+single-node OpenShift, and an upstream issue about a cluster-wide self-reboot storm was open when
+this was written. The header of `lab/snr-operator.yaml` has the details.
 
 ## Gotchas that cost real time
 
-- The `OutOfServiceTaint` fixes the Kubernetes attach and detach layer, but with external
-  Ceph RBD the node has to be genuinely dead for the volume lock to release. Use `--action
-  off`, not reboot. A node that reboots fast rejoins mid-failover and re-grabs its own dead
-  volume. Ask me how I know.
-- vSphere 8: use `--api-path=/rest`. fence-agents 4.10 mis-parses the newer `/api` session
-  reply and fails with `Failed: 'value'` even though the login succeeded. `/rest` still works.
-- NodeHealthCheck will not fence a node carrying the `node-role.kubernetes.io/control-plane`
-  label, even on a hosted cluster where etcd is external and quorum is never at risk. Real
-  dedicated workers labeled `worker` fence fine. Check your labels before you trust auto-fence.
-- Put VMs on `runStrategy: RerunOnFailure`. It recovers from a fence and still lets people
-  power a VM off. `Always` recreates on any stop, which is the "can't power it off" complaint.
+The post has the full troubleshooting section. The short list:
+
+- **Defaults that bite.** FAR's `remediationStrategy` defaults to `ResourceDeletion` (no taint),
+  `fence_redfish` defaults to `reboot`, verifies the BMC certificate, and has no default
+  `--systems-uri`. The templates set all four on purpose.
+- **An empty Secret value fails with the wrong error.** FAR passes the parameter without a value
+  and the agent swallows the next argument: an empty password shows up as
+  `You have to set login name`.
+- **`status` proves the login, not the right to power off.** `fence_redfish` ignores the HTTP
+  status of the power command. Check the account role.
+- **`FenceAgentExecuted` means launched, not done.** Success is the condition
+  `FenceAgentActionSucceeded=True`. The real error is in the log of the FAR leader pod.
+- **FAR stops after its retries** (`FenceAgentFailed`) and does not try again on its own. Fix,
+  delete the CR, apply again.
+- **FAR removes the `out-of-service` taint only when its CR is deleted.**
+- **Cluster-wide proxy:** fencing needs the BMC network in `noProxy`. The image's `curl` ignores
+  CIDR entries there; the agent does not.
+- **Map nodes to BMCs by service tag**, not by naming convention. A wrong map powers off a healthy
+  node.
+- **Hosted clusters:** NodePool `autoRepair` must stay `false`; the operators run on the same
+  workers you fence, so the FAR leader can die with the node (it recovered by itself in 20 s);
+  the NodePool lives on the management cluster while NHC and FAR live in the hosted one.
+- **vSphere 8:** `--api-path=/rest`. And a login that "stops working" after retries is usually a
+  lockout.
+
+Find the FAR leader pod and its node:
+
+```bash
+oc get pod -n openshift-workload-availability -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName "$(oc get lease -n openshift-workload-availability -o jsonpath='{range .items[*]}{.spec.holderIdentity}{"\n"}{end}' | grep '^fence-agents' | cut -d_ -f1)"
+```
 
 ## Verify
 
-```sh
-oc get fenceagentsremediation -A
+```bash
+oc get fenceagentsremediationtemplate,fenceagentsremediation -n openshift-workload-availability
 oc get nodehealthcheck
-oc get events -A | grep '\[remediation\]'
-oc get volumeattachment
+oc get events -A --sort-by=.lastTimestamp | grep -iE 'fence|remediation|out-of-service'
 ```

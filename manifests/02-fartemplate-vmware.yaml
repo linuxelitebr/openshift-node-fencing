@@ -1,0 +1,30 @@
+# FAR template for worker nodes that are vSphere VMs (fence_vmware_rest through vCenter).
+# This is the path the lab used. Same rules as the Redfish template: the Secret is created by
+# command (docs/preflight.md), never stored in git, and its keys never repeat below.
+#
+# vCenter is ONE endpoint for every node, so --ip is shared and --plug maps node -> VM name.
+# Get the VM names with: fence_vmware_rest ... -o list  (see docs/preflight.md)
+apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
+kind: FenceAgentsRemediationTemplate
+metadata:
+  name: fartemplate-vmware
+  namespace: openshift-workload-availability
+spec:
+  template:
+    spec:
+      agent: fence_vmware_rest
+      remediationStrategy: OutOfServiceTaint      # CRD default is ResourceDeletion
+      sharedSecretName: fence-agents-credentials-shared
+      retrycount: 5
+      retryinterval: 5s
+      timeout: 60s
+      sharedparameters:
+        "--action": "off"                         # default is reboot
+        "--ip": "vcenter.example.com"
+        "--api-path": "/rest"                     # vSphere 8 + fence-agents 4.10: /api fails with "Failed: 'value'"
+        "--ssl-insecure": ""
+      nodeparameters:
+        "--plug":
+          worker-0.example.com: "worker-0"
+          worker-1.example.com: "worker-1"
+          worker-2.example.com: "worker-2"

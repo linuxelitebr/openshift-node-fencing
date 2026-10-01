@@ -1,0 +1,36 @@
+# FAR template for bare-metal Dell servers (iDRAC over Redfish). This is the production path.
+#
+# The credential Secret is NOT in this file and never goes into git. Create it with the
+# one-liner in docs/preflight.md, which refuses to create it with an empty password.
+# Any parameter stored in the Secret (--username, --password) must NOT appear again below,
+# or the FAR webhook rejects the template as a duplicate.
+#
+# Every non-obvious value below is set on purpose, because the defaults bite:
+#   remediationStrategy  CRD default is ResourceDeletion, which does NOT add the out-of-service taint
+#   --action             fence_redfish default is reboot; off keeps a sick node from coming back mid-failover
+#   --ssl-insecure       fence_redfish verifies the certificate by default; iDRACs ship self-signed ones
+#   --systems-uri        no default; this is the Dell value, constant across Dell nodes
+#   --ip                 BMC IP, not hostname: fencing should not depend on DNS during an incident
+apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
+kind: FenceAgentsRemediationTemplate
+metadata:
+  name: fartemplate-redfish
+  namespace: openshift-workload-availability
+spec:
+  template:
+    spec:
+      agent: fence_redfish
+      remediationStrategy: OutOfServiceTaint
+      sharedSecretName: fence-agents-credentials-shared
+      retrycount: 5
+      retryinterval: 5s
+      timeout: 60s
+      sharedparameters:
+        "--action": "off"
+        "--systems-uri": "/redfish/v1/Systems/System.Embedded.1"
+        "--ssl-insecure": ""
+      nodeparameters:
+        "--ip":                                   # node name (exactly as in `oc get nodes`) -> its BMC
+          worker-0.example.com: "10.10.0.10"
+          worker-1.example.com: "10.10.0.11"
+          worker-2.example.com: "10.10.0.12"

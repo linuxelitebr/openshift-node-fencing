@@ -1,0 +1,25 @@
+# Self Node Remediation, ONLY for reproducing the SNR experiments in the post.
+#
+# Read this before applying:
+# - Once installed, the SNR agent (a DaemonSet with a watchdog) runs its own API-server check and
+#   reboots a node it believes is isolated. That happens even when no NodeHealthCheck points at SNR.
+# - Do not install it on single-node OpenShift. With no peers, an API-server outage longer than a
+#   few checks (an upgrade does that) sends a control-plane node down the reboot path in the
+#   v0.12.1 code.
+# - Upstream issue medik8s/self-node-remediation#357 (cluster-wide self-reboot storm when the API
+#   server degrades) was still open when this was written. Check its status first.
+# - Removing it: delete the Subscription and CSV first (so the operator cannot recreate its
+#   default config), then the SelfNodeRemediationConfig, then confirm the DaemonSet is gone. The
+#   agent disarms the watchdog on a graceful stop; if /sys/class/watchdog/watchdog*/nowayout is 1,
+#   it cannot, and that node reboots.
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: self-node-remediation
+  namespace: openshift-workload-availability
+spec:
+  channel: stable
+  name: self-node-remediation
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
