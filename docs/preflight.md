@@ -8,12 +8,15 @@ day you need it.
 Outputs shown are real, from a hosted cluster with three bare-metal Dell workers and from the
 vSphere lab, with names, IPs and service tags replaced.
 
-Two rules for the commands that need a password:
+Three rules for the commands that need a password:
 
 - **The password never goes on a command line.** It is read with `read -s` (or Python
-  `getpass`) and fed to the fence agent through stdin.
+  `getpass`) and fed to `oc` or the fence agent through stdin, so it stays out of your shell
+  history and out of the process list.
 - **Paste one line at a time.** While `read` waits for the password, any line you paste after it
   becomes the password.
+- **Run them in bash.** On macOS, start `bash` first: in zsh, `read -p` means something else, and
+  the guard would answer "empty password".
 
 ## 1. Cluster shape
 
@@ -244,17 +247,18 @@ or updates it if it exists, shows any `oc` error as is, and refuses an empty pas
 with the password goes through the pipe straight to `oc apply`, never to the screen:
 
 ```bash
-read -rs -p 'BMC password: ' P; echo; if [ -z "$P" ]; then echo 'ERROR: empty password, nothing done'; else oc create secret generic fence-agents-credentials-shared -n openshift-workload-availability --from-literal=--username=fencing --from-literal=--password="$P" --dry-run=client -o yaml | oc apply -f -; fi; unset P
+read -rs -p 'BMC password: ' P; echo; if [ -z "$P" ]; then echo 'ERROR: empty password, nothing done'; else printf '%s' "$P" | oc create secret generic fence-agents-credentials-shared -n openshift-workload-availability --from-literal=--username=fencing --from-file=--password=/dev/stdin --dry-run=client -o yaml | oc apply -f -; fi; unset P
 ```
 
-Check that no value is empty. This prints only the length of each value:
+Check that no value is empty. This prints only the length of each value, in base64: any non-zero
+number is fine, `0` means empty.
 
 ```bash
 oc get secret fence-agents-credentials-shared -n openshift-workload-availability -o go-template='{{range $k, $v := .data}}{{$k}} {{len $v}}{{"\n"}}{{end}}'
 ```
 
 ```
---password 16
+--password 24
 --username 12
 ```
 
@@ -277,7 +281,7 @@ Status: ON
 
 ### vSphere variant
 
-Same Secret one-liner with the vCenter account (`--username=svc-fencing@vsphere.local`). List
+Same Secret one-liner with the vCenter account (`--from-literal=--username=svc-fencing@vsphere.local`). List
 the VM names that go into `--plug`, then check one, both read-only:
 
 ```bash
