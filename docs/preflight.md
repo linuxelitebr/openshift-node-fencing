@@ -195,6 +195,8 @@ for ip in ('10.10.0.10', '10.10.0.11', '10.10.0.12'):
 "
 ```
 
+* Replace `fencing` with your BMC username.
+   
 ```
 10.10.0.10 200 DELL001 worker-0.example.com On
 10.10.0.11 200 DELL002 worker-1.example.com On
