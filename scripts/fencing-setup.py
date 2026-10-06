@@ -51,6 +51,7 @@ OUT_OF_SERVICE_TAINT = "node.kubernetes.io/out-of-service"
 FAR_TAINT = "remediation.medik8s.io/fence-agents-remediation"
 NODEPOOL_LABEL = "hypershift.openshift.io/nodePool"
 MIN_OPENSHIFT = (4, 15)
+MIN_FAR_FOR_OFF = (0, 6, 0)
 DEFAULT_SYSTEMS_URI = "/redfish/v1/Systems/System.Embedded.1"
 
 # What firmware writes into DMI fields the vendor left blank. Never an identity: many boards
@@ -323,6 +324,11 @@ def norm(value):
     return (value or "").strip().lower()
 
 
+def csv_version(csv):
+    m = re.search(r"\.v(\d+)\.(\d+)\.(\d+)", csv or "")
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
 def placeholder_serial(serial):
     s = norm(serial)
     return s in PLACEHOLDER_SERIALS or len(set(s)) == 1
@@ -523,6 +529,10 @@ def check_operators(oc, rep):
             far_ok = far_ok and pkg != "fence-agents-remediation"
         else:
             rep.add("PASS", "operators", "%s Succeeded, from redhat-operators" % csv)
+        version = csv_version(csv)
+        if pkg == "fence-agents-remediation" and version and version < MIN_FAR_FOR_OFF:
+            rep.add("FAIL", "operators", "%s: --action off needs FAR 0.6.0 or later. This version accepts the "
+                    "template and rejects the action only when it fences. Update the operator." % csv)
     groups, err = oc.get(["operatorgroups.operators.coreos.com", "-n", NS])
     n = len((groups or {}).get("items", []))
     if groups is None:
@@ -620,19 +630,26 @@ def selector_matches(selector, node_labels):
 
 
 def check_conflicts(oc, conf, nodes, selected, rep):
+    """Returns the state of the NodeHealthCheck this script generates: None (absent), 'armed' or 'paused'."""
+    ours = None
     nhcs, err = oc.get(["nodehealthchecks.remediation.medik8s.io"])
     if nhcs is None:
         rep.add("WARN", "conflicts", "cannot list NodeHealthChecks: %s" % err)
     for nhc in (nhcs or {}).get("items", []):
         name, spec = nhc["metadata"]["name"], nhc.get("spec") or {}
+        if name == NHC_NAME:
+            ours = "paused" if spec.get("pauseRequests") else "armed"
+            if spec.get("pauseRequests"):
+                rep.add("WARN", "conflicts", "NodeHealthCheck %s is paused (pauseRequests: %s): nothing is fenced "
+                        "automatically until it is resumed (README)" % (name, ", ".join(spec["pauseRequests"])))
         overlap = [n for n in selected if selector_matches(spec.get("selector"), labels_of(nodes[n]))]
         if not overlap:
             continue
         tmpl = spec.get("remediationTemplate") or {}
         what = "%s %s" % (tmpl.get("kind"), tmpl.get("name")) if tmpl else "escalating remediations"
         if name == NHC_NAME:
-            rep.add("INFO", "conflicts", "NodeHealthCheck %s already exists (remediation: %s); applying the "
-                    "generated 04 updates it" % (name, what))
+            rep.add("INFO", "conflicts", "NodeHealthCheck %s already exists and is %s (remediation: %s); applying "
+                    "the generated 04 updates it" % (name, ours.upper(), what))
         else:
             rep.add("FAIL", "conflicts", "NodeHealthCheck %s already covers %s (remediation: %s). Two health "
                     "checks on one node means two remediations. Delete it or narrow its selector."
@@ -663,6 +680,7 @@ def check_conflicts(oc, conf, nodes, selected, rep):
     for far in (fars or {}).get("items", []):
         rep.add("WARN", "conflicts", "FenceAgentsRemediation %s exists: a fence is running or a drill CR was not "
                 "deleted (the node keeps the out-of-service taint until it is)" % far["metadata"]["name"])
+    return ours
 
 
 def check_bmh(bmhs, err, conf, rep, where):
@@ -1351,7 +1369,7 @@ def main(argv=None):
         nodes = collections.OrderedDict((n["metadata"]["name"], n) for n in nodes_json.get("items", []))
     selected = check_nodes(conf, nodes, rep)
     check_threshold(conf, selected, rep)
-    check_conflicts(oc, conf, nodes, selected, rep)
+    nhc_state = check_conflicts(oc, conf, nodes, selected, rep)
     check_vms(oc, rep)
     check_capacity(oc, nodes, selected, rep)
     check_hosted(mgmt, conf, facts, nodes, rep)
@@ -1425,22 +1443,30 @@ def main(argv=None):
         datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), os.path.basename(conf.path), server.strip())
     complete = bool(selected) and set(proven) >= {n for n in conf.nodes if n in selected}
     if rep.count("FAIL") == 0 and complete:
-        ok, names = generate(oc, conf, selected, run_dir, header, rep)
+        ok, _ = generate(oc, conf, selected, run_dir, header, rep)
     else:
-        ok, names = False, []
+        ok = False
         if rep.count("FAIL") == 0:
             rep.add("FAIL", "manifests", "not every selected worker was matched to its BMC, so nothing was generated")
 
     rep.say("")
     rep.say("%d PASS, %d WARN, %d FAIL" % (rep.count("PASS"), rep.count("WARN"), rep.count("FAIL")))
     if ok:
-        drill = next(n for n in names if n.startswith("03-"))
         rep.say("Manifests in %s (nothing was applied):" % run_dir)
         rep.say("  1. review them; the WARN lines above are yours to judge")
         rep.say("  2. oc apply -f %s" % os.path.join(run_dir, "02-fartemplate-redfish.yaml"))
-        rep.say("  3. drill one node in an agreed window, following docs/drill.md:")
-        rep.say("     oc apply -f %s" % os.path.join(run_dir, drill))
-        rep.say("  4. after the drill (node back on, Ready, drill CR deleted), arm the health check:")
+        rep.say("  3. drill ONE node in an agreed window, following docs/drill.md; pick the node with the")
+        rep.say("     fewest critical VMs (there is one 03-drill file per node):")
+        rep.say("     oc apply -f %s" % os.path.join(run_dir, "03-drill-<node>.yaml"))
+        if nhc_state == "armed":
+            rep.say("     %s is ARMED: pause it before the drill and resume it after (README, pauseRequests)," % NHC_NAME)
+            rep.say("     or it starts its own remediation of the node you powered off")
+        elif nhc_state == "paused":
+            rep.say("     %s is PAUSED: resume it after the drill, or nothing is fenced automatically" % NHC_NAME)
+        if nhc_state:
+            rep.say("  4. %s already exists (%s); apply 04 only to change its settings:" % (NHC_NAME, nhc_state))
+        else:
+            rep.say("  4. after the drill (node back on, Ready, drill CR deleted), arm the health check:")
         rep.say("     oc apply -f %s" % os.path.join(run_dir, "04-nodehealthcheck.yaml"))
     else:
         rep.say("No manifests were written. Fix the FAIL lines and run again.")

@@ -27,7 +27,9 @@ What I measured:
 | Same customer, automatic path (NHC armed, `duration: 300s`) | | not measured yet; by the numbers above, about 6.5 to 7.5 minutes, mostly the `duration` |
 | Lab: hosted cluster, external Ceph RBD | RWO | fence to a test pod mounting the volume on another node in 37 s (a pod, not a VM) |
 
-Versions: OpenShift 4.21, NHC 0.11.0, FAR 0.7.0, fence-agents 4.10.
+Versions: OpenShift 4.21, NHC 0.11.0, FAR 0.7.0, fence-agents 4.10. The setup script also ran on
+OpenShift 4.20 with NHC 0.10.3 and FAR 0.6.1. `--action off` needs FAR 0.6.0 or later: older
+versions accept the template and reject the action only when they fence.
 
 ## Order of work
 

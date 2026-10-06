@@ -8,6 +8,20 @@ either.
 
 Run the one-liners in bash. On macOS, start `bash` first.
 
+If a NodeHealthCheck already covers these nodes (a repeat drill, or a cluster set up before),
+pause it for the whole drill window. The drilled node stays NotReady longer than `duration`, and
+NHC would start its own remediation of the node you just powered off:
+
+```bash
+oc patch nodehealthcheck nhc-workers-far --type merge -p '{"spec":{"pauseRequests":["fencing-drill"]}}'
+```
+
+Resume it after step 6, once the node is `Ready` and the drill CR is gone:
+
+```bash
+oc patch nodehealthcheck nhc-workers-far --type json -p '[{"op":"remove","path":"/spec/pauseRequests"}]'
+```
+
 ## 1. Pick the node and check the room
 
 Prefer the node with the fewest critical VMs, and make sure the others can absorb them:

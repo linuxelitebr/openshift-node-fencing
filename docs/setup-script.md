@@ -116,7 +116,11 @@ Manifests in generated/prod-7k2px-20261006-162602 (nothing was applied):
   If that is blocked, the UUID is the only possible proof.
 - **Reach is tested from the nodes the FAR replicas run on right now.** After a reschedule they
   may run on another worker.
-- **What I tested:** every check by hand on Dell iDRAC hardware (the preflight). The script
-  itself I ran on OpenShift 4.21 with NHC 0.11.0 and FAR 0.7.0, against a Redfish test double,
-  with the real `fence_redfish` agent. Read its first report against your own hardware with
-  care.
+- **FAR 0.6.0 or later.** Older versions accept `--action off` in the template and reject it only
+  when they fence; the script fails on them.
+- **What I tested:** every check by hand on Dell iDRAC hardware (the preflight). The script ran
+  against a customer's hosted cluster with three Dell PowerEdge workers (iDRAC 9) on OpenShift
+  4.20 with NHC 0.10.3 and FAR 0.6.1: 22 PASS, every service tag matched. In my lab it ran on
+  OpenShift 4.21 with NHC 0.11.0 and FAR 0.7.0, against a Redfish test double with the real
+  `fence_redfish` agent, for the failure paths. The UUID fallback and the management-cluster
+  checks have not met real hardware yet.
