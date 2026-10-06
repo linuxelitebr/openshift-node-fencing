@@ -1,0 +1,31 @@
+# fencing-setup.py configuration. Copy it to fencing.conf (git ignores *.conf) and edit.
+# No password goes in this file: the script asks for it once, hidden, and only when the
+# credential Secret does not exist yet.
+
+[bmc]
+# The BMC account FAR logs in with. On Dell iDRAC, the Operator role is enough.
+username = fencing
+# Redfish system resource. This is the Dell iDRAC value; other vendors use other paths
+# (if this one answers 404, the script prints the ones the BMC offers).
+systems_uri = /redfish/v1/Systems/System.Embedded.1
+# iDRACs ship self-signed certificates.
+ssl_insecure = true
+
+[nhc]
+# How long a worker stays NotReady before its BMC powers it off.
+duration = 300s
+# How many workers NHC may fence at the same time. Keep one of the two.
+# 51% of 3 workers: at most 1 at a time. On large clusters, prefer max_unhealthy = 1 or 2.
+min_healthy = 51%
+# max_unhealthy = 1
+
+[hosted]
+# Hosted clusters only: <namespace>/<name> of the HostedCluster on the management cluster.
+# Checked when you also pass --mgmt-context or --mgmt-kubeconfig.
+# hosted_cluster = clusters/my-cluster
+
+[nodes]
+# Every worker, exactly as `oc get nodes` names it, and the IP of its BMC.
+worker-0.example.com = 10.10.0.10
+worker-1.example.com = 10.10.0.11
+worker-2.example.com = 10.10.0.12

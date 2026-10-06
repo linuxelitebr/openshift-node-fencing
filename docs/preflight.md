@@ -8,6 +8,10 @@ day you need it.
 Outputs shown are real, from a hosted cluster with three bare-metal Dell workers (and, for the
 vSphere variant at the end, from a lab), with names, IPs and service tags replaced.
 
+[`scripts/fencing-setup.py`](setup-script.md) runs sections 1 to 10 for every node in one go and
+writes the manifests with your values. This file is what it does, step by step, and what to run
+when you want to see each answer yourself.
+
 Three rules for the commands that need a password:
 
 - **The password never goes on a command line.** It is read with `read -s` (or Python

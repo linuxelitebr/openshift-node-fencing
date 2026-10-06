@@ -36,7 +36,7 @@ anything. Every step has a gate; do not move on until it passes.
 
 | Step | What | Gate |
 | --- | --- | --- |
-| 0 | [`docs/preflight.md`](docs/preflight.md) sections 1 to 9 | every check as described there |
+| 0 | [`docs/preflight.md`](docs/preflight.md) sections 1 to 9, or the setup script below | every check as described there |
 | 1 | `manifests/01-operators.yaml`, or OperatorHub (pick the tiles marked **Red Hat**) | CSVs `Succeeded`, subscriptions from `redhat-operators` |
 | 2 | Secret ([preflight 10](docs/preflight.md#10-create-the-credential-secret-then-test-what-is-inside-it)), then `manifests/02-fartemplate-redfish.yaml` | no empty Secret value; `status` with the Secret's own values says `ON` |
 | 3 | Drill on one node: [`docs/drill.md`](docs/drill.md) with `manifests/03-drill-far-redfish.yaml` | node powers off, its VMs come back elsewhere; then power on, wait for `Ready`, delete the CR |
@@ -45,6 +45,16 @@ anything. Every step has a gate; do not move on until it passes.
 The NodeHealthCheck goes last on purpose. Nothing before it fires on its own. If you install
 the operators from the console, skip `01`: the console already created an OperatorGroup, and two
 OperatorGroups in one namespace break OLM.
+
+**Shortcut for steps 0 and 2:** [`scripts/fencing-setup.py`](docs/setup-script.md) reads a small
+config file with each worker and its BMC IP, runs the preflight checks for every node from inside
+the FAR pod, creates the Secret if it is missing, and writes `02`, `03` (one drill CR per node)
+and `04` with your values, validated by the API. It never applies anything and never powers
+anything off: steps 2 to 4 stay in your hands.
+
+```bash
+python3 scripts/fencing-setup.py -c fencing.conf
+```
 
 The credential Secret is not in this repo and never should be. Create it with the one-liner in the
 preflight.
@@ -109,6 +119,11 @@ The post has the full troubleshooting section. The short list:
 - **An empty Secret value fails with the wrong error.** FAR passes the parameter without a value
   and the agent swallows the next argument: an empty password shows up as
   `You have to set login name`.
+- **Create the Secret before the template.** FAR 0.7.0's webhook removes
+  `sharedSecretName: fence-agents-credentials-shared` from a template or CR when that Secret does
+  not exist, so the template is stored without it. It puts the field back on each FAR CR created
+  while the Secret exists, a workaround FAR marks as temporary, and meanwhile the stored template
+  differs from your file. Applied in the wrong order? Apply the template again.
 - **`status` proves the login, not the right to power off.** `fence_redfish` ignores the HTTP
   status of the power command. Check the account role.
 - **`FenceAgentExecuted` means launched, not done.** Success is the condition

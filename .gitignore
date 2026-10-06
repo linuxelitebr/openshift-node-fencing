@@ -1,1 +1,5 @@
 .DS_Store
+
+# fencing-setup.py: your config and its results hold real node names and BMC addresses
+*.conf
+generated/
