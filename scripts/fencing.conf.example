@@ -10,6 +10,17 @@ username = fencing
 systems_uri = /redfish/v1/Systems/System.Embedded.1
 # iDRACs ship self-signed certificates.
 ssl_insecure = true
+# How patient the fence agent is with a slow BMC, in seconds. These are ceilings, not fixed
+# waits: a fast BMC still returns in a couple of seconds, so a generous value only costs time on
+# a slow BMC (which is when you want it) or a dead one. The defaults cover slow iDRACs on busy
+# management networks without having to measure every server, so leave them unless you have data.
+#   power_timeout: seconds the agent waits for the power state to flip after it sends the off.
+#   login_timeout: seconds it waits to get past the BMC login.
+# The FAR per-attempt timeout is NOT set here: the script derives it (login + power + 10s margin)
+# so it always contains these two. FAR kills the agent at that timeout, so a value shorter than
+# the agent's own budget would cut a slow-but-working fence off mid-run.
+power_timeout = 60
+login_timeout = 20
 
 [nhc]
 # How long a worker stays NotReady before its BMC powers it off.

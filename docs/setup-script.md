@@ -59,7 +59,7 @@ Without it, the script reminds you to check `autoRepair` by hand (preflight sect
 | `account` | the BMC role has `ConfigureComponents` (Operator or Administrator) | 9 |
 | `secret` | created if missing, never modified if present; empty values, a trailing line break, parameters the template also sets | 10 |
 | `agent` | `fence_redfish` status from the FAR pod, with the values read back from the Secret | 10 |
-| `template` | a FAR template already in the cluster (what NHC uses today) against this config: Secret reference, strategy, action, URI, certificate check, each node's BMC IP | |
+| `template` | a FAR template already in the cluster (what NHC uses today) against this config: Secret reference, strategy, action, URI, certificate check, BMC timeouts, each node's BMC IP | |
 | `hosted` | the HostedCluster is this cluster; NodePool `autoRepair: false`; update type; BareMetalHosts | 2 |
 | `manifests` | server-side dry-run with strict validation, through the FAR and NHC webhooks; `sharedSecretName` still present | |
 
@@ -86,6 +86,14 @@ when no line says `FAIL`. `WARN` lines are yours to judge.
   O.E.M.`, or shared by several nodes prove nothing. Then the SMBIOS UUID can prove it under the
   same rule (placeholder UUIDs do not count). A serial that disagrees fails, even when the UUIDs
   match: that case needs a human.
+- **The BMC timeouts default to covering a slow iDRAC.** `power_timeout` (60s) and `login_timeout`
+  (20s) in `[bmc]` are ceilings, not fixed waits: a fast BMC still returns in a couple of seconds,
+  so the generous defaults only cost time on a slow BMC, which is when you want it, or a dead one.
+  FAR's per-attempt `timeout` is not yours to set; the script derives it as login + power + 10s, so
+  it always contains the agent's own budget instead of killing a slow-but-working fence mid-run.
+  Raise the two only with data. The worst case a dead BMC keeps a VM down before FAR gives up is
+  `retrycount x (timeout + retryinterval)`, about 8 minutes at the defaults; the generated template
+  carries that number in a comment so you see it before you apply.
 - **Results go to `generated/<cluster>-<date>-<time>/`**, with `report.txt`. A run with failures
   leaves only the report there. Exit code 0 means manifests were written, 1 means a check failed,
   2 means a config or login problem.

@@ -53,6 +53,14 @@ NODEPOOL_LABEL = "hypershift.openshift.io/nodePool"
 MIN_OPENSHIFT = (4, 15)
 MIN_FAR_FOR_OFF = (0, 6, 0)
 DEFAULT_SYSTEMS_URI = "/redfish/v1/Systems/System.Embedded.1"
+# Blanket BMC timing, in seconds. These are ceilings, not fixed waits: a fast BMC still returns
+# in a couple of seconds, so a generous value only spends time on a slow BMC (good) or a dead one.
+# Chosen to cover slow iDRACs on busy management networks without measuring every server.
+DEFAULT_POWER_TIMEOUT = 60
+DEFAULT_LOGIN_TIMEOUT = 20
+# FAR's per-attempt timeout is derived as login + power + this margin, so it always contains the
+# agent's own budget. FAR kills the agent at that timeout; a shorter one cuts a slow fence off.
+FAR_TIMEOUT_MARGIN = 10
 
 # What firmware writes into DMI fields the vendor left blank. Never an identity: many boards
 # share them. A value that two nodes share is treated the same way.
@@ -342,12 +350,25 @@ class Config:
         self.username = None
         self.systems_uri = DEFAULT_SYSTEMS_URI
         self.ssl_insecure = True
+        self.power_timeout = DEFAULT_POWER_TIMEOUT
+        self.login_timeout = DEFAULT_LOGIN_TIMEOUT
+        self.far_timeout_secs = DEFAULT_LOGIN_TIMEOUT + DEFAULT_POWER_TIMEOUT + FAR_TIMEOUT_MARGIN
         self.duration = "300s"
         self.duration_secs = 300
         self.threshold = ("min_healthy", 51, True)
         self.nodes = collections.OrderedDict()
         self.by_name = []
         self.hosted_cluster = None
+
+
+def parse_timeout_secs(value, key):
+    m = re.match(r"^(\d+)s?$", (value or "").strip())
+    if not m:
+        raise ConfigError("[bmc] %s %r: use a whole number of seconds, like 60" % (key, value))
+    secs = int(m.group(1))
+    if secs <= 0:
+        raise ConfigError("[bmc] %s must be greater than zero" % key)
+    return secs
 
 
 def parse_duration(value):
@@ -370,7 +391,7 @@ def load_config(path):
             cp.read_file(f)
     except (OSError, configparser.Error) as e:
         raise ConfigError(str(e))
-    allowed = {"bmc": {"username", "systems_uri", "ssl_insecure"},
+    allowed = {"bmc": {"username", "systems_uri", "ssl_insecure", "power_timeout", "login_timeout"},
                "nhc": {"duration", "min_healthy", "max_unhealthy"},
                "hosted": {"hosted_cluster"},
                "nodes": None}
@@ -396,6 +417,9 @@ def load_config(path):
         c.ssl_insecure = cp.getboolean("bmc", "ssl_insecure", fallback=True)
     except ValueError:
         raise ConfigError("[bmc] ssl_insecure must be true or false")
+    c.power_timeout = parse_timeout_secs(cp.get("bmc", "power_timeout", fallback=str(DEFAULT_POWER_TIMEOUT)), "power_timeout")
+    c.login_timeout = parse_timeout_secs(cp.get("bmc", "login_timeout", fallback=str(DEFAULT_LOGIN_TIMEOUT)), "login_timeout")
+    c.far_timeout_secs = c.login_timeout + c.power_timeout + FAR_TIMEOUT_MARGIN
 
     if cp.has_section("nhc"):
         c.duration = cp.get("nhc", "duration", fallback="300s").strip()
@@ -880,7 +904,8 @@ def check_reach(oc, conf, pods, rep):
 
 
 def template_params(conf):
-    return ["--action", "--systems-uri", "--ip"] + (["--ssl-insecure"] if conf.ssl_insecure else [])
+    return ["--action", "--systems-uri", "--power-timeout", "--login-timeout", "--ip"] + (
+        ["--ssl-insecure"] if conf.ssl_insecure else [])
 
 
 def stdin_safe(value):
@@ -1120,6 +1145,13 @@ def check_live_template(oc, conf, selected, rep):
         diffs.append("--action is %s, not off" % shared.get("--action", "unset (the agent defaults to reboot)"))
     if shared.get("--systems-uri") != conf.systems_uri:
         diffs.append("--systems-uri is %s, the config says %s" % (shared.get("--systems-uri"), conf.systems_uri))
+    if shared.get("--power-timeout") != str(conf.power_timeout):
+        diffs.append("--power-timeout is %s, the config says %d" % (shared.get("--power-timeout") or "unset", conf.power_timeout))
+    if shared.get("--login-timeout") != str(conf.login_timeout):
+        diffs.append("--login-timeout is %s, the config says %d" % (shared.get("--login-timeout") or "unset", conf.login_timeout))
+    if spec.get("timeout") != "%ds" % conf.far_timeout_secs:
+        diffs.append("timeout is %s, the config derives %ds (login-timeout + power-timeout + margin)"
+                     % (spec.get("timeout") or "unset", conf.far_timeout_secs))
     if ("--ssl-insecure" in shared) != conf.ssl_insecure:
         diffs.append("--ssl-insecure is %s" % ("set, the config says verify" if "--ssl-insecure" in shared
                                               else "missing: the agent verifies the BMC certificate"))
@@ -1190,15 +1222,23 @@ def check_hosted(mgmt, conf, facts, nodes, rep):
 # ------------------------------------------------------------------------------ manifests
 
 def far_spec_lines(conf, node_ips, indent):
+    # retrycount/retryinterval stay at the validated defaults. The worst case a dead BMC keeps a
+    # VM down before FAR gives up is retrycount x (timeout + retryinterval). timeout is derived
+    # (login-timeout + power-timeout + margin) so it always contains the agent's own budget: FAR
+    # kills the agent at timeout, so a shorter one would cut a slow-but-working iDRAC off mid-fence.
+    budget = 5 * (conf.far_timeout_secs + 5)
     lines = ["agent: fence_redfish",
              "remediationStrategy: OutOfServiceTaint",
              "sharedSecretName: %s" % SECRET,
+             "# worst-case dead-BMC window: 5 x (%ds + 5s) = ~%d min" % (conf.far_timeout_secs, round(budget / 60)),
              "retrycount: 5",
              "retryinterval: 5s",
-             "timeout: 60s",
+             "timeout: %ds" % conf.far_timeout_secs,
              "sharedparameters:",
              '  "--action": "off"',
-             '  "--systems-uri": "%s"' % conf.systems_uri]
+             '  "--systems-uri": "%s"' % conf.systems_uri,
+             '  "--power-timeout": "%d"' % conf.power_timeout,
+             '  "--login-timeout": "%d"' % conf.login_timeout]
     if conf.ssl_insecure:
         lines.append('  "--ssl-insecure": ""')
     lines += ["nodeparameters:", '  "--ip":']
