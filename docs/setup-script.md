@@ -108,17 +108,28 @@ when no line says `FAIL`. `WARN` lines are yours to judge.
   leaves only the report there. Exit code 0 means manifests were written, 1 means a check failed,
   2 means a config or login problem.
 
-When it passes, the end of the output tells you what to apply and in which order:
+When it passes, the end of the output tells you what to apply and in which order. This one is from
+a cluster without user workload monitoring, so it includes the namespace label; with user workload
+monitoring enabled, those three lines are not there:
 
 ```
-Manifests in generated/prod-7k2px-20261006-162602 (nothing was applied):
+Manifests in generated/prod-7k2px-20261020-162602 (nothing was applied):
   1. review them; the WARN lines above are yours to judge
-  2. oc apply -f generated/prod-7k2px-20261006-162602/02-fartemplate-redfish.yaml
-  3. drill one node in an agreed window, following docs/drill.md:
-     oc apply -f generated/prod-7k2px-20261006-162602/03-drill-worker-0.example.com.yaml
+  2. oc apply -f generated/prod-7k2px-20261020-162602/02-fartemplate-redfish.yaml
+     then the BMC health check, so a dead BMC alerts before you depend on it (docs/bmc-healthcheck.md):
+     oc apply -f generated/prod-7k2px-20261020-162602/05-bmc-healthcheck.yaml
+     user workload monitoring is off, so nothing evaluates its alerts until the platform
+     Prometheus does; label the namespace (not inside 05: deleting 05 would delete it):
+     oc label namespace openshift-workload-availability openshift.io/cluster-monitoring=true
+  3. drill ONE node in an agreed window, following docs/drill.md; pick the node with the
+     fewest critical VMs (there is one 03-drill file per node):
+     oc apply -f generated/prod-7k2px-20261020-162602/03-drill-<node>.yaml
   4. after the drill (node back on, Ready, drill CR deleted), arm the health check:
-     oc apply -f generated/prod-7k2px-20261006-162602/04-nodehealthcheck.yaml
+     oc apply -f generated/prod-7k2px-20261020-162602/04-nodehealthcheck.yaml
 ```
+
+Do not skip the label when it shows up. On the first real cluster it was missed: the check ran
+and failed, and no alert fired, because nothing was evaluating the rules.
 
 ## Limits
 

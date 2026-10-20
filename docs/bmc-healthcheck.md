@@ -48,8 +48,10 @@ namespace, operators included.
 
 ## Apply
 
-The setup script writes `05-bmc-healthcheck.yaml` with the installed FAR image and your
-`[healthcheck]` settings. Apply it right after the template (02), before you arm anything:
+Right after the template (02), before you arm anything.
+
+**1. Apply 05.** The setup script writes `05-bmc-healthcheck.yaml` with the installed FAR image
+and your `[healthcheck]` settings:
 
 ```bash
 oc apply -f generated/<run>/05-bmc-healthcheck.yaml
@@ -65,8 +67,18 @@ oc apply -f manifests/05-bmc-healthcheck.yaml
 oc set image cronjob/fencing-bmc-healthcheck -n openshift-workload-availability check="$(oc get deploy fence-agents-remediation-controller-manager -n openshift-workload-availability -o jsonpath='{.spec.template.spec.containers[?(@.name=="manager")].image}')"
 ```
 
-Check that the alert rules are loaded, by whichever Prometheus applies. Three names must come
-back. With the namespace label (platform Prometheus):
+**2. Without user workload monitoring, label the namespace.** Skip this step when user workload
+monitoring is enabled. The setup script tells you which case you are in: it prints this command
+in its next steps only when it is needed. Without it, the alert rules exist and nothing evaluates
+them. The label starts no pod: it makes the platform Prometheus, already running in
+`openshift-monitoring`, read the rules in this namespace.
+
+```bash
+oc label namespace openshift-workload-availability openshift.io/cluster-monitoring=true
+```
+
+**3. Check that the alert rules are loaded**, by whichever Prometheus applies. Three names must
+come back, about half a minute after step 1 or 2. With the namespace label (platform Prometheus):
 
 ```bash
 oc exec -n openshift-monitoring prometheus-k8s-0 -c prometheus -- curl -s localhost:9090/api/v1/rules | grep -o 'FencingBMC[A-Za-z]*' | sort -u
@@ -81,7 +93,7 @@ oc exec -n openshift-user-workload-monitoring thanos-ruler-user-workload-0 -c th
 In the console they are under **Observe > Alerting > Alerting rules**, with source **Platform**
 or **User** respectively. The default filter may hide one of the two.
 
-Run it once now instead of waiting for the schedule:
+**4. Run it once now** instead of waiting for the schedule:
 
 ```bash
 oc create job bmc-check-now -n openshift-workload-availability --from=cronjob/fencing-bmc-healthcheck
