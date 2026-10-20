@@ -2,7 +2,7 @@
 
 `scripts/fencing-setup.py` runs the checks of [`preflight.md`](preflight.md) for every node,
 creates the credential Secret if it is missing, and writes manifests 02, 03 and 04 with your
-node names and BMC IPs. It never applies anything and never powers anything on or off. The
+node names and BMC IPs, plus the BMC health check 05 with the installed FAR image. It never applies anything and never powers anything on or off. The
 drill and arming the health check stay manual, on purpose.
 
 ## What you need
@@ -48,6 +48,7 @@ Without it, the script reminds you to check `autoRepair` by hand (preflight sect
 | --- | --- | --- |
 | `cluster` | OpenShift 4.15 or later; single-node refused; hosted cluster noted; update in progress | 1 |
 | `operators` | NHC and FAR from `redhat-operators`, `Succeeded`, one OperatorGroup; Self Node Remediation present | 3 |
+| `monitoring` | something evaluates the `05` alert rules: user workload monitoring enabled, or the namespace labeled `openshift.io/cluster-monitoring=true` | |
 | `nodes` | every worker the health check selects has a BMC in the config; none carries a `control-plane` or `master` label; NotReady nodes; leftover fencing taints | 1 |
 | `nhc` | how many nodes the threshold lets NHC fence at once, rounded the way NHC rounds; the duration | |
 | `conflicts` | other NodeHealthChecks or MachineHealthChecks over these workers; BareMetalHosts holding these BMCs; leftover FAR CRs | 2 |
@@ -94,6 +95,15 @@ when no line says `FAIL`. `WARN` lines are yours to judge.
   Raise the two only with data. The worst case a dead BMC keeps a VM down before FAR gives up is
   `retrycount x (timeout + retryinterval)`, about 8 minutes at the defaults; the generated template
   carries that number in a comment so you see it before you apply.
+- **It writes the BMC health check too.** `05-bmc-healthcheck.yaml` comes from
+  `manifests/05-bmc-healthcheck.yaml` with the installed FAR image and your `[healthcheck]`
+  settings (`auto_reset`, `reset_after`), and goes through the same strict dry-run. Apply it right
+  after 02. The details, the automatic BMC reboot and how to test it are in
+  [`bmc-healthcheck.md`](bmc-healthcheck.md).
+- **On FAR 0.7.0 and later, the template asks FAR to validate it.** It carries
+  `statusValidationSample: "100%"`, so FAR runs `status` against every node's BMC when the
+  template is created or changed and writes the result into the template status. FAR 0.6.x does
+  not have the field, so the script leaves it out there.
 - **Results go to `generated/<cluster>-<date>-<time>/`**, with `report.txt`. A run with failures
   leaves only the report there. Exit code 0 means manifests were written, 1 means a check failed,
   2 means a config or login problem.

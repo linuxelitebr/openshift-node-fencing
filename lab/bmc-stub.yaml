@@ -1,0 +1,168 @@
+# LAB ONLY. A fake Redfish BMC to test 05-bmc-healthcheck.yaml without real hardware.
+# One pod, five behaviours, one Service each (port 443):
+#   bmc-stub-ok     PowerState On                   -> check passes
+#   bmc-stub-off    PowerState Off                  -> passes, unless mapped to a Ready node
+#   bmc-stub-empty  Systems collection empty, 404   -> what a confused iDRAC did at a customer
+#   bmc-stub-hang   accepts the connection, never answers
+#   bmc-stub-auth   401 for every request            -> wrong password
+# Each one also serves /redfish/v1/Managers and a Manager.Reset action. A reset on the
+# "empty" BMC brings its system back, like an iDRAC reboot did at the customer. The reset
+# count per mode is in the pod log ("RESET mode=..."). Restart the pod to start over.
+# Credentials it accepts: fencing / lab-only-password. Never point a real NodeHealthCheck at
+# a template that uses these addresses: ForceOff here powers off nothing.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bmc-stub-lab
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bmc-stub
+  namespace: bmc-stub-lab
+data:
+  stub.py: |
+    import base64, http.server, json, socketserver, ssl, threading, time
+    USER, PASSWORD = "fencing", "lab-only-password"
+    SYS = "/redfish/v1/Systems/System.Embedded.1"
+    MGR = "/redfish/v1/Managers/iDRAC.Embedded.1"
+    MODES = {8443: "ok", 8444: "empty", 8445: "hang", 8446: "auth", 8447: "off"}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def reply(self, code, body):
+            data = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def authed(self):
+            want = "Basic " + base64.b64encode(("%s:%s" % (USER, PASSWORD)).encode()).decode()
+            return self.headers.get("Authorization") == want
+
+        def do_GET(self):
+            mode = self.server.mode
+            if mode == "hang":
+                time.sleep(3600)
+                return
+            if mode == "auth" or not self.authed():
+                return self.reply(401, {"error": {"message": "Unauthorized"}})
+            path = self.path.rstrip("/")
+            if path == "/redfish/v1":
+                return self.reply(200, {"Product": "Lab Redfish stub", "Systems": {"@odata.id": "/redfish/v1/Systems"}})
+            if path == "/redfish/v1/Systems":
+                members = [] if mode == "empty" else [{"@odata.id": SYS}]
+                return self.reply(200, {"Members": members})
+            if path == SYS and mode != "empty":
+                return self.reply(200, {"PowerState": "Off" if mode == "off" else "On"})
+            if path == "/redfish/v1/Managers":
+                return self.reply(200, {"Members": [{"@odata.id": MGR}]})
+            if path == MGR:
+                return self.reply(200, {"Actions": {"#Manager.Reset": {
+                    "target": MGR + "/Actions/Manager.Reset",
+                    "ResetType@Redfish.AllowableValues": ["GracefulRestart", "ForceRestart"]}}})
+            return self.reply(404, {"error": {"message": "Resource not found"}})
+
+        def do_POST(self):
+            mode = self.server.mode
+            if mode == "hang":
+                time.sleep(3600)
+                return
+            if mode == "auth" or not self.authed():
+                return self.reply(401, {"error": {"message": "Unauthorized"}})
+            if self.path.rstrip("/") != MGR + "/Actions/Manager.Reset":
+                return self.reply(404, {"error": {"message": "Resource not found"}})
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            print("RESET mode=%s type=%s" % (mode, body.get("ResetType")), flush=True)
+            if mode == "empty":
+                self.server.mode = "ok"
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, fmt, *args):
+            print("%s %s" % (self.server.mode, fmt % args), flush=True)
+
+    class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain("/tls/tls.crt", "/tls/tls.key")
+    for port, mode in MODES.items():
+        srv = Server(("0.0.0.0", port), Handler)
+        srv.mode = mode
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    print("stub up on", MODES, flush=True)
+    threading.Event().wait()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bmc-stub
+  namespace: bmc-stub-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: bmc-stub}
+  template:
+    metadata:
+      labels: {app: bmc-stub}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: stub
+          image: registry.access.redhat.com/ubi9/python-311:latest
+          command: ["python3", "-u", "/stub/stub.py"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: stub, mountPath: /stub}
+            - {name: tls, mountPath: /tls}
+      volumes:
+        - name: stub
+          configMap: {name: bmc-stub}
+        - name: tls
+          secret: {secretName: bmc-stub-tls}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bmc-stub-ok
+  namespace: bmc-stub-lab
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: bmc-stub-tls
+spec:
+  selector: {app: bmc-stub}
+  ports: [{port: 443, targetPort: 8443}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: bmc-stub-empty, namespace: bmc-stub-lab}
+spec:
+  selector: {app: bmc-stub}
+  ports: [{port: 443, targetPort: 8444}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: bmc-stub-hang, namespace: bmc-stub-lab}
+spec:
+  selector: {app: bmc-stub}
+  ports: [{port: 443, targetPort: 8445}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: bmc-stub-auth, namespace: bmc-stub-lab}
+spec:
+  selector: {app: bmc-stub}
+  ports: [{port: 443, targetPort: 8446}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: bmc-stub-off, namespace: bmc-stub-lab}
+spec:
+  selector: {app: bmc-stub}
+  ports: [{port: 443, targetPort: 8447}]

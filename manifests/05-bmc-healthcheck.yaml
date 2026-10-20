@@ -1,0 +1,549 @@
+# BMC health check: a CronJob that asks every BMC in the live FAR template for its power
+# status, the same way FAR would reach it to fence, and alerts when one stops answering.
+# Optionally, it reboots a BMC that keeps failing.
+#
+# FAR only talks to a BMC when it fences. An iDRAC that hangs, or that loses its host
+# inventory, stays invisible until the night a node dies and the fence fails. This check
+# moves that discovery to a normal working day. The check itself never powers anything on
+# or off: the fence action is always `status`.
+#
+# Nothing in this file is cluster-specific. Each run reads the FAR template that is in the
+# cluster (nodes, BMC addresses, Redfish URI, timeouts, Secret) and the cluster proxy, so it
+# follows whatever FAR uses today. The one value to check is the image: it must contain the
+# fence agents, so it is the FAR manager image. fencing-setup.py writes the installed one;
+# by hand, after applying this file:
+#
+#   oc set image cronjob/fencing-bmc-healthcheck -n openshift-workload-availability \
+#     check="$(oc get deploy fence-agents-remediation-controller-manager -n openshift-workload-availability \
+#       -o jsonpath='{.spec.template.spec.containers[?(@.name=="manager")].image}')"
+#
+# What fails a run (and, after 25 minutes without a good run, fires FencingBMCHealthCheckFailing):
+#   - a BMC that errors, times out or refuses the login
+#   - a BMC that reports the server Off while its node is Ready (wrong BMC for that node)
+#   - a worker with no BMC in the template (WORKER_SELECTOR; set it to "" to skip)
+#   - the template or its credential Secret missing
+# Every result is also logged as a "FENCING-BMC-CHECK:" line, for Loki if you have it.
+#
+# Automatic BMC reboot (AUTO_RESET, off by default). After RESET_AFTER failed runs in a row
+# for one BMC, the check sends a Redfish Manager.Reset to that BMC: the management
+# controller restarts, the host keeps running. That fixes a BMC that still answers but is
+# confused (on Dell, an iDRAC whose Systems collection went empty). It cannot fix a BMC that
+# does not answer at all: the reset request never arrives. Guard rails:
+#   - never while FAR is remediating that node
+#   - at most one BMC per run, at most one reset per BMC every RESET_COOLDOWN_HOURS
+#   - the account in the FAR Secret needs the privilege to restart the BMC (ConfigureManager
+#     in Redfish terms; the iDRAC Operator role does not have it)
+# Each reset fires FencingBMCAutoReset, which stays active until that BMC passes a check
+# again. By then the notification has gone out, so a reset never happens quietly: a BMC that
+# needs rebooting every week is a hardware or firmware ticket, not a feature.
+#
+# The alerts are a PrometheusRule on kube-state-metrics, which OpenShift already runs. They
+# need user workload monitoring (enableUserWorkload: true in cluster-monitoring-config). On a
+# cluster without it, label this namespace openshift.io/cluster-monitoring=true and the
+# platform Prometheus evaluates them instead. No Loki needed either way.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fencing-bmc-healthcheck
+  namespace: openshift-workload-availability
+---
+# Reads the FAR template, the Secret it points at and the FAR CRs (to skip a reset while a node
+# is being fenced). Writes only ConfigMaps in this namespace: the failure counter and the
+# reset markers the FencingBMCAutoReset alert watches.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fencing-bmc-healthcheck
+  namespace: openshift-workload-availability
+rules:
+  - apiGroups: ["fence-agents-remediation.medik8s.io"]
+    resources: ["fenceagentsremediationtemplates"]
+    verbs: ["get"]
+  - apiGroups: ["fence-agents-remediation.medik8s.io"]
+    resources: ["fenceagentsremediations"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fencing-bmc-healthcheck
+  namespace: openshift-workload-availability
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fencing-bmc-healthcheck
+subjects:
+  - kind: ServiceAccount
+    name: fencing-bmc-healthcheck
+    namespace: openshift-workload-availability
+---
+# Read-only, cluster-wide: the nodes (to spot a worker without a BMC, or a BMC that says Off
+# while its node is Ready) and the cluster proxy (OLM gives the FAR pod those proxy variables;
+# this pod has to read them itself to reach the BMCs by the same path).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fencing-bmc-healthcheck
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list"]
+  - apiGroups: ["config.openshift.io"]
+    resources: ["proxies"]
+    resourceNames: ["cluster"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fencing-bmc-healthcheck
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fencing-bmc-healthcheck
+subjects:
+  - kind: ServiceAccount
+    name: fencing-bmc-healthcheck
+    namespace: openshift-workload-availability
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fencing-bmc-healthcheck
+  namespace: openshift-workload-availability
+data:
+  check.py: |
+    #!/usr/bin/env python3
+    # Builds each node's fence agent arguments exactly as FAR does (template parameters with
+    # {{.NodeName}} rendered, node parameters on top, then the shared and per-node Secrets, as
+    # --name=value), swaps the action for `status`, and runs the agent. With AUTO_RESET=true it
+    # also restarts a BMC that failed RESET_AFTER runs in a row.
+    import base64
+    import concurrent.futures
+    import datetime
+    import json
+    import os
+    import re
+    import subprocess
+    import sys
+    import time
+
+    import requests
+    import urllib3
+
+    urllib3.disable_warnings()
+
+    TAG = "FENCING-BMC-CHECK:"
+    SA = "/var/run/secrets/kubernetes.io/serviceaccount"
+    API = "https://kubernetes.default.svc"
+    NS = open(SA + "/namespace").read().strip()
+    TEMPLATE = os.environ.get("FAR_TEMPLATE", "fartemplate-redfish")
+    WORKER_SELECTOR = os.environ.get("WORKER_SELECTOR", "node-role.kubernetes.io/worker")
+    PARALLEL = int(os.environ.get("PARALLEL", "8"))
+    AUTO_RESET = os.environ.get("AUTO_RESET", "false").lower() == "true"
+    RESET_AFTER = int(os.environ.get("RESET_AFTER", "5"))
+    RESET_COOLDOWN = float(os.environ.get("RESET_COOLDOWN_HOURS", "6")) * 3600
+    STATE = "fencing-bmc-healthcheck-state"
+    MARKER_LABEL = "fencing-bmc-healthcheck/reset"
+
+    api = requests.Session()
+    api.trust_env = False  # the API server is never reached through the cluster proxy
+    api.verify = SA + "/ca.crt"
+    api.headers["Authorization"] = "Bearer " + open(SA + "/token").read().strip()
+
+
+    def call(method, path, body=None):
+        r = api.request(method, API + path, json=body, timeout=30)
+        if r.status_code == 404 and method == "GET":
+            return None
+        r.raise_for_status()
+        return r.json() if r.content else None
+
+
+    def get(path):
+        return call("GET", path)
+
+
+    def log(status, **kv):
+        print(" ".join([TAG, status] + ["%s=%s" % (k, v) for k, v in kv.items()]), flush=True)
+
+
+    def seconds(duration, default):
+        """Go duration (90s, 1m30s, 2m) to seconds."""
+        if not duration:
+            return default
+        total = 0.0
+        for value, unit in re.findall(r"(\d+(?:\.\d+)?)(ms|h|m|s)", duration):
+            total += float(value) * {"h": 3600, "m": 60, "s": 1, "ms": 0.001}[unit]
+        return total or default
+
+
+    def render(value, node):
+        return re.sub(r"\{\{\s*\.NodeName\s*\}\}", node, value)
+
+
+    def secret(name):
+        obj = get("/api/v1/namespaces/%s/secrets/%s" % (NS, name))
+        if obj is None:
+            raise LookupError("Secret %s not found" % name)
+        return {k: base64.b64decode(v).decode() for k, v in (obj.get("data") or {}).items()}
+
+
+    def build(spec, node, shared_secret):
+        params = {}
+        for k, v in (spec.get("sharedparameters") or {}).items():
+            params[k] = render(v, node)
+        for k, per_node in (spec.get("nodeparameters") or {}).items():
+            if node in per_node:
+                params[k] = per_node[node]
+        creds = {k: render(v, node) for k, v in shared_secret.items()}
+        node_secret = (spec.get("nodeSecretNames") or {}).get(node)
+        if node_secret:
+            creds.update(secret(node_secret))
+        for k, v in creds.items():
+            if k in params:
+                raise ValueError("%s is set in both the Secret and the template" % k)
+            params[k] = v
+        for k in ("--action", "action"):
+            params.pop(k, None)
+        return params
+
+
+    def bmc_of(params):
+        return params.get("--ip") or params.get("ip") or "?"
+
+
+    def check(agent, params, timeout, ready):
+        """Returns (ok, detail). The agent inherits this process's environment, proxy included."""
+        args = [agent, "--action=status"] + ["%s=%s" % (k, v) if v != "" else k for k, v in params.items()]
+        t0 = time.time()
+        try:
+            p = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               universal_newlines=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False, "no answer within %ds" % timeout
+        out = " ".join(p.stdout.split())
+        secs = "%.1fs" % (time.time() - t0)
+        if p.returncode == 0 and re.search(r"\bON\b", out.upper()):
+            return True, "power=On " + secs
+        if p.returncode == 2 and re.search(r"\bOFF\b", out.upper()):
+            if ready:
+                return False, "BMC says Off but the node is Ready: this BMC is not this node's"
+            return True, "power=Off " + secs
+        return False, "exit %s: %s" % (p.returncode, out[-300:] or "no output")
+
+
+    def reset_bmc(params):
+        """Redfish Manager.Reset on the BMC's first manager. Restarts the BMC, not the host."""
+        ip, port = bmc_of(params), params.get("--ipport", "443")
+        if ip.count(":") == 1:
+            ip, port = ip.split(":")
+        base = "https://%s:%s" % (ip, port)
+        bmc = requests.Session()  # trust_env stays on: the cluster proxy variables apply here
+        bmc.auth = (params.get("--username", ""), params.get("--password", ""))
+        bmc.verify = "--ssl-insecure" not in params
+        bmc.headers.update({"accept": "application/json", "OData-Version": "4.0"})
+        r = bmc.get(base + "/redfish/v1/Managers", timeout=(5, 30))
+        r.raise_for_status()
+        members = r.json().get("Members") or []
+        if not members:
+            return False, "the BMC lists no manager to reset"
+        r = bmc.get(base + members[0]["@odata.id"], timeout=(5, 30))
+        r.raise_for_status()
+        action = (r.json().get("Actions") or {}).get("#Manager.Reset") or {}
+        target = action.get("target")
+        if not target:
+            return False, "the manager offers no Manager.Reset action"
+        allowed = action.get("ResetType@Redfish.AllowableValues") or ["GracefulRestart"]
+        kind = "GracefulRestart" if "GracefulRestart" in allowed else allowed[0]
+        r = bmc.post(base + target, json={"ResetType": kind}, timeout=(5, 30))
+        if r.status_code >= 300:
+            return False, "Manager.Reset answered HTTP %s (does the account have ConfigureManager?)" % r.status_code
+        return True, "Manager.Reset %s accepted (HTTP %s)" % (kind, r.status_code)
+
+
+    def load_state():
+        cm = get("/api/v1/namespaces/%s/configmaps/%s" % (NS, STATE))
+        if cm is None:
+            return {}, None
+        try:
+            return json.loads((cm.get("data") or {}).get("state.json") or "{}"), cm
+        except ValueError:
+            return {}, cm
+
+
+    def save_state(state, cm):
+        body = {"apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": STATE, "namespace": NS},
+                "data": {"state.json": json.dumps(state, sort_keys=True)}}
+        if cm is None:
+            call("POST", "/api/v1/namespaces/%s/configmaps" % NS, body)
+        else:
+            body["metadata"]["resourceVersion"] = cm["metadata"]["resourceVersion"]
+            call("PUT", "/api/v1/namespaces/%s/configmaps/%s" % (NS, STATE), body)
+
+
+    def mark_reset(node, bmc, detail):
+        """The FencingBMCAutoReset alert is active while this ConfigMap exists."""
+        name = ("fencing-bmc-reset-" + node)[:253].rstrip(".-")
+        path = "/api/v1/namespaces/%s/configmaps" % NS
+        if get(path + "/" + name) is not None:
+            call("DELETE", path + "/" + name)  # a new reset restarts the alert window
+        call("POST", path, {"apiVersion": "v1", "kind": "ConfigMap",
+                            "metadata": {"name": name, "namespace": NS, "labels": {MARKER_LABEL: "true"}},
+                            "data": {"node": node, "bmc": bmc, "detail": detail,
+                                     "time": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}})
+
+
+    def clear_markers(results):
+        """A reset marker goes away once its BMC passes a check, or its node leaves the template."""
+        items = (get("/api/v1/namespaces/%s/configmaps?labelSelector=%s%%3Dtrue" % (NS, MARKER_LABEL)) or {}).get("items", [])
+        for cm in items:
+            node = (cm.get("data") or {}).get("node", "")
+            if node in results and not results[node][0]:
+                continue
+            call("DELETE", "/api/v1/namespaces/%s/configmaps/%s" % (NS, cm["metadata"]["name"]))
+            log("RESET-CLEARED", node=node or "?", reason="BMC passes again" if node in results else "node left the template")
+
+
+    def auto_reset(results, params_by_node):
+        state, cm = load_state()
+        now = time.time()
+        for node in list(state):
+            if node not in results:
+                del state[node]
+        for node, (ok, _) in results.items():
+            entry = state.setdefault(node, {"fails": 0, "lastReset": 0})
+            entry["fails"] = 0 if ok else entry["fails"] + 1
+        remediating = {f["metadata"]["name"] for f in (get(
+            "/apis/fence-agents-remediation.medik8s.io/v1alpha1/namespaces/%s/fenceagentsremediations" % NS)
+            or {}).get("items", [])}
+        due = sorted((n for n, e in state.items() if e["fails"] >= RESET_AFTER and n in params_by_node),
+                     key=lambda n: -state[n]["fails"])
+        for node in due:
+            entry, bmc = state[node], bmc_of(params_by_node[node])
+            if node in remediating:
+                log("RESET-SKIPPED", node=node, bmc=bmc, reason="FAR is remediating this node")
+                continue
+            wait = entry["lastReset"] + RESET_COOLDOWN - now
+            if wait > 0:
+                log("RESET-SKIPPED", node=node, bmc=bmc, reason="cooldown, %dm left" % (wait // 60))
+                continue
+            try:
+                ok, detail = reset_bmc(params_by_node[node])
+            except requests.RequestException as e:
+                ok, detail = False, "%s: %s" % (type(e).__name__, str(e)[-200:])
+            entry["lastReset"] = now  # a failed attempt also waits for the cooldown
+            if ok:
+                entry["fails"] = 0
+                mark_reset(node, bmc, detail)
+                log("RESET", node=node, bmc=bmc, detail=detail.replace(" ", "/"))
+            else:
+                log("RESET-FAILED", node=node, bmc=bmc, reason=detail)
+            break  # one BMC per run
+        save_state(state, cm)
+
+
+    def main():
+        tmpl = get("/apis/fence-agents-remediation.medik8s.io/v1alpha1/namespaces/%s/"
+                   "fenceagentsremediationtemplates/%s" % (NS, TEMPLATE))
+        if tmpl is None:
+            log("FAIL", reason="template %s/%s not found: nothing can be fenced" % (NS, TEMPLATE))
+            return 1
+        spec = tmpl["spec"]["template"]["spec"]
+        agent = spec.get("agent", "fence_redfish")
+        timeout = seconds(spec.get("timeout"), 60)
+        nodes = set()
+        for per_node in (spec.get("nodeparameters") or {}).values():
+            nodes.update(per_node)
+        nodes.update(spec.get("nodeSecretNames") or {})
+
+        shared_name = spec.get("sharedSecretName")
+        if not shared_name and not spec.get("nodeSecretNames"):
+            log("FAIL", reason="template has no sharedSecretName (FAR's webhook drops it when the Secret "
+                               "was missing at apply time): fences would run without credentials")
+            return 1
+        try:
+            shared_secret = secret(shared_name) if shared_name else {}
+        except LookupError as e:
+            log("FAIL", reason=str(e))
+            return 1
+
+        failed = 0
+        cluster = {}
+        selector = "?labelSelector=" + WORKER_SELECTOR if WORKER_SELECTOR else ""
+        for n in (get("/api/v1/nodes" + selector) or {}).get("items", []):
+            cond = {c["type"]: c["status"] for c in n.get("status", {}).get("conditions", [])}
+            cluster[n["metadata"]["name"]] = cond.get("Ready") == "True"
+        if WORKER_SELECTOR:
+            for n in sorted(set(cluster) - nodes):
+                log("FAIL", node=n, reason="worker has no BMC in the template: it cannot be fenced")
+                failed += 1
+
+        try:
+            st = (get("/apis/config.openshift.io/v1/proxies/cluster") or {}).get("status") or {}
+        except requests.HTTPError:
+            st = {}
+        for key, var in (("httpProxy", "HTTP_PROXY"), ("httpsProxy", "HTTPS_PROXY"), ("noProxy", "NO_PROXY")):
+            if st.get(key):
+                os.environ[var] = os.environ[var.lower()] = st[key]
+
+        params_by_node, jobs, results = {}, {}, {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=PARALLEL) as ex:
+            for node in sorted(nodes):
+                try:
+                    params_by_node[node] = build(spec, node, shared_secret)
+                except (ValueError, LookupError) as e:
+                    log("FAIL", node=node, reason=str(e))
+                    failed += 1
+                    continue
+                jobs[node] = ex.submit(check, agent, params_by_node[node], timeout, cluster.get(node, False))
+        for node, job in jobs.items():
+            ok, detail = job.result()
+            results[node] = (ok, detail)
+            bmc = bmc_of(params_by_node[node])
+            if ok:
+                log("OK", node=node, bmc=bmc, detail=detail.replace(" ", "/"))
+            else:
+                log("FAIL", node=node, bmc=bmc, reason=detail)
+                failed += 1
+        try:
+            clear_markers(results)
+            if AUTO_RESET:
+                auto_reset(results, params_by_node)
+        except requests.RequestException as e:
+            log("RESET-ERROR", reason="%s: %s" % (type(e).__name__, str(e)[-200:]))
+        log("SUMMARY", template=TEMPLATE, bmcs=len(nodes), failed=failed, auto_reset=str(AUTO_RESET).lower())
+        return 1 if failed else 0
+
+
+    if __name__ == "__main__":
+        sys.exit(main())
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fencing-bmc-healthcheck
+  namespace: openshift-workload-availability
+spec:
+  # Every 10 minutes is plenty: one read-only Redfish call per BMC. BMCs that are already
+  # flaky do not need more load. If you change it, keep the 1500 s in FencingBMCHealthCheckFailing
+  # above two intervals, and remember RESET_AFTER counts runs, not minutes.
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      # The platform's KubeJobFailed alert (openshift-monitoring) watches every failed Job in
+      # openshift-* namespaces for 15 minutes, and stays on until the Job object is gone. Deleting
+      # each Job 14 minutes after it ends keeps that generic alert out of the way: while a BMC is
+      # failing there is always a recent Job to read, and once it recovers nothing lingers.
+      ttlSecondsAfterFinished: 840
+      activeDeadlineSeconds: 540
+      template:
+        spec:
+          serviceAccountName: fencing-bmc-healthcheck
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: check
+              image: registry.redhat.io/workload-availability/fence-agents-remediation-rhel9-operator@sha256:f148b988d372df4fa9d6209b43fb21092cc19b126387b05814cabd706367a584
+              command: ["python3", "/check/check.py"]
+              env:
+                - name: FAR_TEMPLATE
+                  value: fartemplate-redfish
+                - name: WORKER_SELECTOR
+                  value: node-role.kubernetes.io/worker
+                - name: PARALLEL
+                  value: "8"
+                - name: AUTO_RESET
+                  value: "false"
+                - name: RESET_AFTER
+                  value: "5"
+                - name: RESET_COOLDOWN_HOURS
+                  value: "6"
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 64Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: check
+                  mountPath: /check
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: check
+              configMap:
+                name: fencing-bmc-healthcheck
+            - name: tmp
+              emptyDir: {}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: fencing-bmc-healthcheck
+  namespace: openshift-workload-availability
+spec:
+  groups:
+    - name: fencing-bmc-healthcheck
+      rules:
+        # 1500 s is two and a half 10-minute intervals without a good run. One bad run is not
+        # enough on its own (a BMC that misses one answer and recovers is noise); two in a row
+        # is a BMC you cannot count on tonight.
+        - alert: FencingBMCHealthCheckFailing
+          expr: |
+            time() - max(kube_cronjob_status_last_successful_time{job="kube-state-metrics",namespace="openshift-workload-availability",cronjob="fencing-bmc-healthcheck"}) > 1500
+          labels:
+            severity: critical
+          annotations:
+            summary: Automatic fencing is degraded for at least one node.
+            description: >-
+              The fencing BMC health check has not passed for more than 25 minutes. At least one
+              BMC does not answer, refuses the login, or does not match its node, so a failure on
+              that node would not be fenced automatically. Run
+              `oc logs -n openshift-workload-availability -l job-name --tail=50 | grep FENCING-BMC-CHECK`
+              to see which. On Dell, a hung or empty iDRAC usually recovers with an iDRAC reboot
+              (Maintenance > Diagnostics > Reboot iDRAC), which leaves the host running.
+        - alert: FencingBMCHealthCheckNeverSucceeded
+          expr: |
+            absent(kube_cronjob_status_last_successful_time{job="kube-state-metrics",namespace="openshift-workload-availability",cronjob="fencing-bmc-healthcheck"})
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: The fencing BMC health check has not passed once.
+            description: >-
+              The CronJob is missing or has never completed a good run. Check that it exists and
+              read the log of its last job.
+        # Active while the reset marker ConfigMap exists. The check deletes it on the first run in
+        # which that BMC passes. If the check stops running, the alert stays on.
+        - alert: FencingBMCAutoReset
+          expr: |
+            kube_configmap_info{job="kube-state-metrics",namespace="openshift-workload-availability",configmap=~"fencing-bmc-reset-.+"}
+          labels:
+            severity: warning
+          annotations:
+            summary: "A BMC was rebooted automatically: {{ $labels.configmap }}"
+            description: >-
+              The BMC health check rebooted a BMC that failed several runs in a row. The host was
+              not touched. If the BMC answers again, fencing is back for that node, but a BMC that
+              needs this repeatedly is a firmware or hardware problem: check its firmware version
+              against the healthy ones and open a ticket with the vendor. Details:
+              `oc get configmap {{ $labels.configmap }} -n openshift-workload-availability -o yaml`.
+              This alert clears by itself when the BMC passes the next check.

@@ -41,6 +41,7 @@ anything. Every step has a gate; do not move on until it passes.
 | 0 | [`docs/preflight.md`](docs/preflight.md) sections 1 to 9, or the setup script below | every check as described there |
 | 1 | `manifests/01-operators.yaml`, or OperatorHub (pick the tiles marked **Red Hat**) | CSVs `Succeeded`, subscriptions from `redhat-operators` |
 | 2 | Secret ([preflight 10](docs/preflight.md#10-create-the-credential-secret-then-test-what-is-inside-it)), then `manifests/02-fartemplate-redfish.yaml` | no empty Secret value; `status` with the Secret's own values says `ON` |
+| 2b | BMC health check: [`docs/bmc-healthcheck.md`](docs/bmc-healthcheck.md) with `manifests/05-bmc-healthcheck.yaml` | one run logs `SUMMARY ... failed=0` |
 | 3 | Drill on one node: [`docs/drill.md`](docs/drill.md) with `manifests/03-drill-far-redfish.yaml` | node powers off, its VMs come back elsewhere; then power on, wait for `Ready`, delete the CR |
 | 4 | `manifests/04-nodehealthcheck.yaml` | `oc get nodehealthcheck` says `Enabled` |
 
@@ -51,8 +52,8 @@ OperatorGroups in one namespace break OLM.
 **Shortcut for steps 0 and 2:** [`scripts/fencing-setup.py`](docs/setup-script.md) reads a small
 config file with each worker and its BMC IP, runs the preflight checks for every node from inside
 the FAR pod, creates the Secret if it is missing, and writes `02`, `03` (one drill CR per node)
-and `04` with your values, validated by the API. It never applies anything and never powers
-anything off: steps 2 to 4 stay in your hands.
+`04` and the BMC health check `05` with your values, validated by the API. It never applies
+anything and never powers anything off: steps 2 to 4 stay in your hands.
 
 ```bash
 python3 scripts/fencing-setup.py -c fencing.conf
@@ -137,6 +138,10 @@ The post has the full troubleshooting section. The short list:
   CIDR entries there; the agent does not.
 - **Map nodes to BMCs by service tag**, not by naming convention. A wrong map powers off a healthy
   node.
+- **A BMC can die quietly.** FAR only talks to it when it fences, so a hung iDRAC, or one that
+  answers and logs in but lists no system under `/redfish/v1/Systems`, shows up on the night you
+  need it. Both happened at a customer. `05` checks every BMC every 10 minutes, alerts, and can
+  reboot a BMC that keeps failing ([docs/bmc-healthcheck.md](docs/bmc-healthcheck.md)).
 - **Hosted clusters:** keep NodePool `autoRepair: false` with FAR; the operators run on the same
   workers you fence, so the FAR leader can die with the node (it recovered by itself in 20 s);
   the NodePool lives on the management cluster while NHC and FAR live in the hosted one.
@@ -153,6 +158,7 @@ oc get pod -n openshift-workload-availability -o custom-columns=POD:.metadata.na
 
 ```bash
 oc get fenceagentsremediationtemplate,fenceagentsremediation -n openshift-workload-availability
+oc get cronjob fencing-bmc-healthcheck -n openshift-workload-availability
 oc get nodehealthcheck
 oc get events -A --sort-by=.lastTimestamp | grep -iE 'fence|remediation|out-of-service'
 ```

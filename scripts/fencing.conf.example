@@ -34,6 +34,15 @@ duration = 300s
 max_unhealthy = 1
 # min_healthy = 51%
 
+[healthcheck]
+# The BMC health check (05) asks every BMC for its power status every 10 minutes and alerts when
+# one stops answering. It can also reboot a BMC (the management controller, not the server) that
+# failed reset_after runs in a row: that fixes an iDRAC that answers but lost its server, not one
+# that does not answer at all. The account in [bmc] then needs the right to restart the BMC.
+# Every automatic reboot fires its own alert. Details: docs/bmc-healthcheck.md
+auto_reset = false
+reset_after = 5
+
 [hosted]
 # Hosted clusters only: <namespace>/<name> of the HostedCluster on the management cluster.
 # Checked when you also pass --mgmt-context or --mgmt-kubeconfig.

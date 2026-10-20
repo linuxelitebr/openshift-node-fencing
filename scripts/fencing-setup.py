@@ -11,8 +11,9 @@ It does by itself what docs/preflight.md does by hand:
      Reset action and the account role
   4. creates the credential Secret if it does not exist (warns and uses it if it does)
   5. runs `fence_redfish --action status` from the FAR pod with the Secret's own values
-  6. only when nothing failed: writes the FAR template, one drill CR per node and the
-     NodeHealthCheck, and has the API validate them (server-side dry-run, strict)
+  6. only when nothing failed: writes the FAR template, one drill CR per node, the
+     NodeHealthCheck and the BMC health check (05), and has the API validate them
+     (server-side dry-run, strict)
 
 It never applies a manifest and never powers anything on or off. The BMC password is typed
 at a hidden prompt (or piped with --password-stdin) and only travels through stdin.
@@ -52,6 +53,9 @@ FAR_TAINT = "remediation.medik8s.io/fence-agents-remediation"
 NODEPOOL_LABEL = "hypershift.openshift.io/nodePool"
 MIN_OPENSHIFT = (4, 15)
 MIN_FAR_FOR_OFF = (0, 6, 0)
+MIN_FAR_FOR_STATUS_VALIDATION = (0, 7, 0)
+HEALTHCHECK_MANIFEST = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "manifests",
+                                    "05-bmc-healthcheck.yaml")
 DEFAULT_SYSTEMS_URI = "/redfish/v1/Systems/System.Embedded.1"
 # Blanket BMC timing, in seconds. These are ceilings, not fixed waits: a fast BMC still returns
 # in a couple of seconds, so a generous value only spends time on a slow BMC (good) or a dead one.
@@ -359,6 +363,8 @@ class Config:
         self.nodes = collections.OrderedDict()
         self.by_name = []
         self.hosted_cluster = None
+        self.auto_reset = False
+        self.reset_after = 5
 
 
 def parse_timeout_secs(value, key):
@@ -394,6 +400,7 @@ def load_config(path):
     allowed = {"bmc": {"username", "systems_uri", "ssl_insecure", "power_timeout", "login_timeout"},
                "nhc": {"duration", "min_healthy", "max_unhealthy"},
                "hosted": {"hosted_cluster"},
+               "healthcheck": {"auto_reset", "reset_after"},
                "nodes": None}
     for section in cp.sections():
         if section not in allowed:
@@ -468,6 +475,15 @@ def load_config(path):
             if not (DNS_LABEL.match(ns) and DNS_SUBDOMAIN.match(name)):
                 raise ConfigError("[hosted] hosted_cluster %r: expected <namespace>/<name>" % hc)
             c.hosted_cluster = (ns, name)
+    if cp.has_section("healthcheck"):
+        try:
+            c.auto_reset = cp.getboolean("healthcheck", "auto_reset", fallback=False)
+        except ValueError:
+            raise ConfigError("[healthcheck] auto_reset must be true or false")
+        value = cp.get("healthcheck", "reset_after", fallback="5").strip()
+        if not value.isdigit() or int(value) < 2:
+            raise ConfigError("[healthcheck] reset_after %r: a whole number of failed runs, 2 or more" % value)
+        c.reset_after = int(value)
     return c
 
 
@@ -528,7 +544,7 @@ def check_cluster(oc, rep):
     return facts
 
 
-def check_operators(oc, rep):
+def check_operators(oc, rep, facts):
     subs, err = oc.get(["subscriptions.operators.coreos.com", "-n", NS])
     if subs is None:
         rep.add("FAIL", "operators", "cannot list Subscriptions in %s: %s" % (NS, err))
@@ -554,6 +570,8 @@ def check_operators(oc, rep):
         else:
             rep.add("PASS", "operators", "%s Succeeded, from redhat-operators" % csv)
         version = csv_version(csv)
+        if pkg == "fence-agents-remediation":
+            facts["far_version"] = version
         if pkg == "fence-agents-remediation" and version and version < MIN_FAR_FOR_OFF:
             rep.add("FAIL", "operators", "%s: --action off needs FAR 0.6.0 or later. This version accepts the "
                     "template and rejects the action only when it fences. Update the operator." % csv)
@@ -1246,7 +1264,7 @@ def far_spec_lines(conf, node_ips, indent):
     return [" " * indent + line for line in lines]
 
 
-def render_template(conf, nodes_in, stamp):
+def render_template(conf, nodes_in, stamp, status_validation=False):
     head = ["# FAR template: how FAR fences each worker below through its BMC over Redfish.",
             "# %s" % stamp,
             "# Inert on its own: nothing uses it until the NodeHealthCheck (04) points at it.",
@@ -1258,9 +1276,12 @@ def render_template(conf, nodes_in, stamp):
             "metadata:",
             "  name: %s" % TEMPLATE,
             "  namespace: %s" % NS,
-            "spec:",
-            "  template:",
-            "    spec:"]
+            "spec:"]
+    if status_validation:
+        # FAR 0.7.0+: on create and on every spec change, FAR runs `status` against every node's
+        # BMC and records the result in the template status. Read-only. Ongoing checks are 05.
+        head.append('  statusValidationSample: "100%"')
+    head += ["  template:", "    spec:"]
     return "\n".join(head + far_spec_lines(conf, [(n, conf.nodes[n]) for n in nodes_in], 6)) + "\n"
 
 
@@ -1312,10 +1333,57 @@ def render_nhc(conf, total, stamp):
     return "\n".join(lines) + "\n"
 
 
-def generate(oc, conf, selected, run_dir, stamp, rep):
+def render_healthcheck(conf, image, stamp):
+    """manifests/05 with the installed FAR image and the [healthcheck] settings; None if the
+    repo copy is missing or no longer has the lines this edits."""
+    try:
+        with open(HEALTHCHECK_MANIFEST) as f:
+            text = f.read()
+    except OSError:
+        return None
+    edits = ((r"(\n\s+image: )\S+", r"\g<1>" + image),
+             (r'(- name: AUTO_RESET\n\s+value: )"[^"]*"', r'\g<1>"%s"' % str(conf.auto_reset).lower()),
+             (r'(- name: RESET_AFTER\n\s+value: )"[^"]*"', r'\g<1>"%d"' % conf.reset_after))
+    for pattern, repl in edits:
+        text, n = re.subn(pattern, lambda m, r=repl: m.expand(r), text, count=1)
+        if n != 1:
+            return None
+    return "# %s\n%s" % (stamp, text)
+
+
+def check_monitoring(oc, rep):
+    """The 05 alerts need a Prometheus that evaluates rules in this namespace."""
+    ns, _ = oc.get(["namespace", NS])
+    if ((ns or {}).get("metadata", {}).get("labels") or {}).get("openshift.io/cluster-monitoring") == "true":
+        rep.add("PASS", "monitoring", "%s has openshift.io/cluster-monitoring=true: the platform Prometheus "
+                "evaluates the BMC health check alerts (05)" % NS)
+        return
+    cm, _ = oc.get(["configmap", "cluster-monitoring-config", "-n", "openshift-monitoring"])
+    config = ((cm or {}).get("data") or {}).get("config.yaml", "")
+    if re.search(r"(?m)^\s*enableUserWorkload:\s*true\s*$", config):
+        rep.add("PASS", "monitoring", "user workload monitoring is enabled: it evaluates the BMC health check "
+                "alerts (05)")
+    else:
+        rep.add("WARN", "monitoring", "user workload monitoring is off, so nothing would evaluate the BMC health "
+                "check alerts (05). Either enable it, or let the platform Prometheus do it:\n"
+                "oc label namespace %s openshift.io/cluster-monitoring=true" % NS)
+
+
+def generate(oc, conf, selected, run_dir, stamp, rep, facts):
     nodes_in = [n for n in conf.nodes if n in selected]
     files = collections.OrderedDict()
-    files["02-fartemplate-redfish.yaml"] = render_template(conf, nodes_in, stamp)
+    validation = bool(facts.get("far_version")) and facts["far_version"] >= MIN_FAR_FOR_STATUS_VALIDATION
+    files["02-fartemplate-redfish.yaml"] = render_template(conf, nodes_in, stamp, validation)
+    deploy, err = oc.get(["deployment", FAR_DEPLOY, "-n", NS])
+    image = next((c.get("image") for c in ((deploy or {}).get("spec", {}).get("template", {}).get("spec", {})
+                                           .get("containers") or []) if c.get("name") == "manager"), None)
+    healthcheck = render_healthcheck(conf, image, stamp) if image else None
+    if healthcheck:
+        files["05-bmc-healthcheck.yaml"] = healthcheck
+    else:
+        rep.add("WARN", "manifests", "05-bmc-healthcheck.yaml not generated: %s" % (
+            "the FAR manager image was not found (%s)" % err if not image else
+            "%s is missing or was changed by hand" % os.path.normpath(HEALTHCHECK_MANIFEST)))
     for node in nodes_in:
         files["03-drill-%s.yaml" % node] = render_drill(conf, node, stamp)
     files["04-nodehealthcheck.yaml"] = render_nhc(conf, len(selected), stamp)
@@ -1400,7 +1468,8 @@ def main(argv=None):
     rep.say("")
 
     facts = check_cluster(oc, rep)
-    far_ok = check_operators(oc, rep)
+    far_ok = check_operators(oc, rep, facts)
+    check_monitoring(oc, rep)
     nodes_json, err = oc.get(["nodes"])
     if nodes_json is None:
         rep.add("FAIL", "nodes", "cannot list nodes: %s" % err)
@@ -1483,7 +1552,7 @@ def main(argv=None):
         datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), os.path.basename(conf.path), server.strip())
     complete = bool(selected) and set(proven) >= {n for n in conf.nodes if n in selected}
     if rep.count("FAIL") == 0 and complete:
-        ok, _ = generate(oc, conf, selected, run_dir, header, rep)
+        ok, _ = generate(oc, conf, selected, run_dir, header, rep, facts)
     else:
         ok = False
         if rep.count("FAIL") == 0:
@@ -1495,6 +1564,9 @@ def main(argv=None):
         rep.say("Manifests in %s (nothing was applied):" % run_dir)
         rep.say("  1. review them; the WARN lines above are yours to judge")
         rep.say("  2. oc apply -f %s" % os.path.join(run_dir, "02-fartemplate-redfish.yaml"))
+        if os.path.exists(os.path.join(run_dir, "05-bmc-healthcheck.yaml")):
+            rep.say("     then the BMC health check, so a dead BMC alerts before you depend on it (docs/bmc-healthcheck.md):")
+            rep.say("     oc apply -f %s" % os.path.join(run_dir, "05-bmc-healthcheck.yaml"))
         rep.say("  3. drill ONE node in an agreed window, following docs/drill.md; pick the node with the")
         rep.say("     fewest critical VMs (there is one 03-drill file per node):")
         rep.say("     oc apply -f %s" % os.path.join(run_dir, "03-drill-<node>.yaml"))
