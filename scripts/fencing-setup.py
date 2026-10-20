@@ -1352,21 +1352,23 @@ def render_healthcheck(conf, image, stamp):
 
 
 def check_monitoring(oc, rep):
-    """The 05 alerts need a Prometheus that evaluates rules in this namespace."""
+    """The 05 alerts need a Prometheus that evaluates rules in this namespace. Returns True when
+    something does; False means the namespace label goes into the next steps."""
     ns, _ = oc.get(["namespace", NS])
     if ((ns or {}).get("metadata", {}).get("labels") or {}).get("openshift.io/cluster-monitoring") == "true":
         rep.add("PASS", "monitoring", "%s has openshift.io/cluster-monitoring=true: the platform Prometheus "
                 "evaluates the BMC health check alerts (05)" % NS)
-        return
+        return True
     cm, _ = oc.get(["configmap", "cluster-monitoring-config", "-n", "openshift-monitoring"])
     config = ((cm or {}).get("data") or {}).get("config.yaml", "")
     if re.search(r"(?m)^\s*enableUserWorkload:\s*true\s*$", config):
         rep.add("PASS", "monitoring", "user workload monitoring is enabled: it evaluates the BMC health check "
                 "alerts (05)")
-    else:
-        rep.add("WARN", "monitoring", "user workload monitoring is off, so nothing would evaluate the BMC health "
-                "check alerts (05). Either enable it, or let the platform Prometheus do it:\n"
-                "oc label namespace %s openshift.io/cluster-monitoring=true" % NS)
+        return True
+    rep.add("WARN", "monitoring", "user workload monitoring is off, so nothing would evaluate the BMC health "
+            "check alerts (05). Either enable it, or let the platform Prometheus do it:\n"
+            "oc label namespace %s openshift.io/cluster-monitoring=true" % NS)
+    return False
 
 
 def generate(oc, conf, selected, run_dir, stamp, rep, facts):
@@ -1469,7 +1471,7 @@ def main(argv=None):
 
     facts = check_cluster(oc, rep)
     far_ok = check_operators(oc, rep, facts)
-    check_monitoring(oc, rep)
+    alerts_evaluated = check_monitoring(oc, rep)
     nodes_json, err = oc.get(["nodes"])
     if nodes_json is None:
         rep.add("FAIL", "nodes", "cannot list nodes: %s" % err)
@@ -1567,6 +1569,10 @@ def main(argv=None):
         if os.path.exists(os.path.join(run_dir, "05-bmc-healthcheck.yaml")):
             rep.say("     then the BMC health check, so a dead BMC alerts before you depend on it (docs/bmc-healthcheck.md):")
             rep.say("     oc apply -f %s" % os.path.join(run_dir, "05-bmc-healthcheck.yaml"))
+            if not alerts_evaluated:
+                rep.say("     user workload monitoring is off, so nothing evaluates its alerts until the platform")
+                rep.say("     Prometheus does; label the namespace (not inside 05: deleting 05 would delete it):")
+                rep.say("     oc label namespace %s openshift.io/cluster-monitoring=true" % NS)
         rep.say("  3. drill ONE node in an agreed window, following docs/drill.md; pick the node with the")
         rep.say("     fewest critical VMs (there is one 03-drill file per node):")
         rep.say("     oc apply -f %s" % os.path.join(run_dir, "03-drill-<node>.yaml"))

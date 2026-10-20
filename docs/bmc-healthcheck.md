@@ -34,12 +34,17 @@ Someone has to evaluate the alert rules:
   `openshift-workload-availability`.
 - **User workload monitoring off:** label the namespace and the platform Prometheus takes over.
   User workload monitoring ignores namespaces with that label, so the rules never run twice.
+  Without one of the two, the alerts exist and nobody reads them: the check runs, fails, and
+  nothing fires. That is not hypothetical, it happened on the first real cluster.
 
 ```bash
 oc label namespace openshift-workload-availability openshift.io/cluster-monitoring=true
 ```
 
-`fencing-setup.py` checks which of the two applies and tells you.
+`fencing-setup.py` checks which of the two applies. When neither does, the label command shows
+up in its next steps, right under the `apply` of 05. It is a separate command on purpose and not
+a Namespace object inside 05: `oc delete -f 05-bmc-healthcheck.yaml` would then delete the whole
+namespace, operators included.
 
 ## Apply
 
@@ -59,6 +64,22 @@ oc apply -f manifests/05-bmc-healthcheck.yaml
 ```bash
 oc set image cronjob/fencing-bmc-healthcheck -n openshift-workload-availability check="$(oc get deploy fence-agents-remediation-controller-manager -n openshift-workload-availability -o jsonpath='{.spec.template.spec.containers[?(@.name=="manager")].image}')"
 ```
+
+Check that the alert rules are loaded, by whichever Prometheus applies. Three names must come
+back. With the namespace label (platform Prometheus):
+
+```bash
+oc exec -n openshift-monitoring prometheus-k8s-0 -c prometheus -- curl -s localhost:9090/api/v1/rules | grep -o 'FencingBMC[A-Za-z]*' | sort -u
+```
+
+With user workload monitoring:
+
+```bash
+oc exec -n openshift-user-workload-monitoring thanos-ruler-user-workload-0 -c thanos-ruler -- sh -c 'curl -s localhost:10902/api/v1/rules' | grep -o 'FencingBMC[A-Za-z]*' | sort -u
+```
+
+In the console they are under **Observe > Alerting > Alerting rules**, with source **Platform**
+or **User** respectively. The default filter may hide one of the two.
 
 Run it once now instead of waiting for the schedule:
 

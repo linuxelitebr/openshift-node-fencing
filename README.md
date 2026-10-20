@@ -41,7 +41,7 @@ anything. Every step has a gate; do not move on until it passes.
 | 0 | [`docs/preflight.md`](docs/preflight.md) sections 1 to 9, or the setup script below | every check as described there |
 | 1 | `manifests/01-operators.yaml`, or OperatorHub (pick the tiles marked **Red Hat**) | CSVs `Succeeded`, subscriptions from `redhat-operators` |
 | 2 | Secret ([preflight 10](docs/preflight.md#10-create-the-credential-secret-then-test-what-is-inside-it)), then `manifests/02-fartemplate-redfish.yaml` | no empty Secret value; `status` with the Secret's own values says `ON` |
-| 2b | BMC health check: [`docs/bmc-healthcheck.md`](docs/bmc-healthcheck.md) with `manifests/05-bmc-healthcheck.yaml` | one run logs `SUMMARY ... failed=0` |
+| 2b | BMC health check: [`docs/bmc-healthcheck.md`](docs/bmc-healthcheck.md) with `manifests/05-bmc-healthcheck.yaml`; without user workload monitoring, also `oc label namespace openshift-workload-availability openshift.io/cluster-monitoring=true` | one run logs `SUMMARY ... failed=0`; the three `FencingBMC` rules are loaded |
 | 3 | Drill on one node: [`docs/drill.md`](docs/drill.md) with `manifests/03-drill-far-redfish.yaml` | node powers off, its VMs come back elsewhere; then power on, wait for `Ready`, delete the CR |
 | 4 | `manifests/04-nodehealthcheck.yaml` | `oc get nodehealthcheck` says `Enabled` |
 
