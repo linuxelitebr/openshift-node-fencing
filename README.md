@@ -137,7 +137,9 @@ The post has the full troubleshooting section. The short list:
 - **Cluster-wide proxy:** fencing needs the BMC network in `noProxy`. The image's `curl` ignores
   CIDR entries there; the agent does not.
 - **Map nodes to BMCs by service tag**, not by naming convention. A wrong map powers off a healthy
-  node.
+  node. For the node whose iDRAC IP nobody knows, `scripts/find-bmc.py` sweeps the BMC network
+  and finds it by service tag, or prints the whole `[nodes]` map
+  ([docs/find-bmc.md](docs/find-bmc.md)).
 - **A BMC can die quietly.** FAR only talks to it when it fences, so a hung iDRAC, or one that
   answers and logs in but lists no system under `/redfish/v1/Systems`, shows up on the night you
   need it. Both happened at a customer. `05` checks every BMC every 10 minutes, alerts, and can

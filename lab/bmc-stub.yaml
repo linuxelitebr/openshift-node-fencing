@@ -8,6 +8,7 @@
 # Each one also serves /redfish/v1/Managers and a Manager.Reset action. A reset on the
 # "empty" BMC brings its system back, like an iDRAC reboot did at the customer. The reset
 # count per mode is in the pod log ("RESET mode=..."). Restart the pod to start over.
+# Each system reports SKU "LAB<MODE>" (LABOK, LABOFF...), for find-bmc.py.
 # Credentials it accepts: fencing / lab-only-password. Never point a real NodeHealthCheck at
 # a template that uses these addresses: ForceOff here powers off nothing.
 apiVersion: v1
@@ -46,16 +47,18 @@ data:
             if mode == "hang":
                 time.sleep(3600)
                 return
+            path = self.path.rstrip("/")
+            if path == "/redfish/v1":  # the service root needs no login, like on a real BMC
+                return self.reply(200, {"Product": "Lab Redfish stub", "RedfishVersion": "1.17.0",
+                                        "Systems": {"@odata.id": "/redfish/v1/Systems"}})
             if mode == "auth" or not self.authed():
                 return self.reply(401, {"error": {"message": "Unauthorized"}})
-            path = self.path.rstrip("/")
-            if path == "/redfish/v1":
-                return self.reply(200, {"Product": "Lab Redfish stub", "Systems": {"@odata.id": "/redfish/v1/Systems"}})
             if path == "/redfish/v1/Systems":
                 members = [] if mode == "empty" else [{"@odata.id": SYS}]
                 return self.reply(200, {"Members": members})
             if path == SYS and mode != "empty":
-                return self.reply(200, {"PowerState": "Off" if mode == "off" else "On"})
+                return self.reply(200, {"PowerState": "Off" if mode == "off" else "On",
+                                        "SKU": "LAB%s" % mode.upper(), "Manufacturer": "Lab"})
             if path == "/redfish/v1/Managers":
                 return self.reply(200, {"Members": [{"@odata.id": MGR}]})
             if path == MGR:
