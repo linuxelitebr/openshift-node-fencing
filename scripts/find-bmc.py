@@ -65,8 +65,11 @@ def root(ip):
         return None
     if not isinstance(j, dict) or "RedfishVersion" not in j and "Systems" not in j:
         return None
-    dell = (j.get("Oem") or {}).get("Dell") or {}
-    return {"ip": ip, "product": j.get("Product") or j.get("Name") or "?",
+    oem = j.get("Oem") or {}
+    dell = oem.get("Dell") or {}
+    # Product is optional in Redfish (a Lenovo XCC leaves it out): fall back to Vendor and the Oem keys
+    vendor = " ".join(str(x) for x in [j.get("Product"), j.get("Vendor")] + sorted(oem) if x)
+    return {"ip": ip, "product": j.get("Product") or j.get("Vendor") or j.get("Name") or "?", "vendor": vendor,
             "systems": (j.get("Systems") or {}).get("@odata.id") or "/redfish/v1/Systems",
             "tag": dell.get("ServiceTag")}
 
@@ -91,7 +94,8 @@ def systems(b):
 
 with ThreadPoolExecutor(max_workers=cfg["parallel"]) as ex:
     found = [b for b in ex.map(root, cfg["hosts"]) if b]
-bmcs = [b for b in found if cfg["any_vendor"] or "dell" in b["product"].lower() or "idrac" in b["product"].lower()]
+KNOWN = ("dell", "idrac", "lenovo", "xclarity")
+bmcs = [b for b in found if cfg["any_vendor"] or any(k in b["vendor"].lower() for k in KNOWN)]
 with ThreadPoolExecutor(max_workers=min(8, len(bmcs) or 1)) as ex:
     bmcs = list(ex.map(systems, bmcs))
 print(json.dumps({"answered": len(found), "bmcs": bmcs}))
@@ -129,7 +133,7 @@ def parse_args(argv):
     p.add_argument("--service-tag", help="the serial / service tag to look for")
     p.add_argument("--map", action="store_true",
                    help="read every worker's serial (oc debug) and print the [nodes] block for fencing.conf")
-    p.add_argument("--any-vendor", action="store_true", help="keep non-Dell Redfish BMCs too")
+    p.add_argument("--any-vendor", action="store_true", help="keep every Redfish BMC, not only Dell and Lenovo")
     p.add_argument("--parallel", type=int, default=32, help="addresses probed at once (default 32)")
     p.add_argument("--password-stdin", action="store_true", help="read the BMC password from stdin")
     p.add_argument("--context", help="kubeconfig context")

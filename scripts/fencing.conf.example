@@ -6,7 +6,9 @@
 # The BMC account FAR logs in with. On Dell iDRAC, the Operator role is enough.
 username = fencing
 # Redfish system resource. This is the Dell iDRAC value; other vendors use other paths
-# (if this one answers 404, the script prints the ones the BMC offers).
+# (if this one answers 404, the script prints the ones the BMC offers). Lenovo XClarity
+# Controller (XCC): /redfish/v1/Systems/1. On an XCC the SKU is the machine type-model, and the
+# identity check matches the node serial against SerialNumber instead.
 systems_uri = /redfish/v1/Systems/System.Embedded.1
 # iDRACs ship self-signed certificates.
 ssl_insecure = true

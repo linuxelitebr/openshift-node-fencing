@@ -29,7 +29,11 @@ It never logs in blindly, never changes anything, and the password only travels 
 Still, a sweep of a whole network looks like a scan to an IDS. Agree on it with the network team
 before you run it.
 
-By default it keeps Dell BMCs only. `--any-vendor` keeps every Redfish BMC.
+By default it keeps Dell (iDRAC) and Lenovo (XClarity Controller) BMCs, recognized by the
+`Product`, `Vendor` or `Oem` fields of the service root (an XCC leaves `Product` out).
+`--any-vendor` keeps every Redfish BMC. The Lenovo detection is checked against the formats
+Redfish allows, not yet against a real XCC sweep: if a sweep keeps none of your XCCs, add
+`--any-vendor`.
 
 ## Find one node's BMC
 
