@@ -134,6 +134,9 @@ and failed, and no alert fired, because nothing was evaluating the rules.
 
 ## Limits
 
+- **Same model, different servers.** On a Lenovo XCC the `SKU` is the machine type-model, the
+  same on every server of a model, so a repeated `SKU` only counts as "two entries point at one
+  server" when the serial numbers do not tell the servers apart.
 - **Dell first, Lenovo XCC read.** The default `systems_uri` is the iDRAC one, and the identity
   check knows that Dell keeps the service tag in `SKU`. A Lenovo XClarity Controller uses
   `/redfish/v1/Systems/1` and keeps the serial in `SerialNumber` (read from a real XCC; preflight
@@ -146,8 +149,9 @@ and failed, and no alert fired, because nothing was evaluating the rules.
   `allow_control_plane = true` with `max_unhealthy = 1`: every fence there powers off an etcd
   member, and that is a decision, not a default. NHC fences one master at a time and only when
   the etcd quorum guard shows that master's etcd already out. Then the script also requires the
-  quorum guard PDB, a Ready guard pod on every master, and enough memory on the other two nodes
-  (a FAIL there, not a WARN). Masters running workloads next to dedicated workers (two health
+  quorum guard PDB and a Ready guard pod on every master. It warns when the other two nodes lack
+  the memory for the busiest one's VMs: the fence still brings back what fits, and without it
+  nothing on that node comes back, so that is a WARN with the numbers, not a reason to refuse. Masters running workloads next to dedicated workers (two health
   checks needed) are refused, and so are control-plane labels on hosted-cluster workers.
 - **IPv4 BMC addresses or host names.** IPv6 is not handled, and a host name gets a warning:
   fencing then depends on DNS during an incident.
@@ -159,7 +163,7 @@ and failed, and no alert fired, because nothing was evaluating the rules.
   when they fence; the script fails on them.
 - **Compact mode, what I tested:** every case with a fake `oc` (compact with and without
   `allow_control_plane`, each threshold, no PDB, two PDBs, a guard pod not Ready or missing, the
-  capacity FAIL, the mixed and hosted refusals, the generated 04), and the etcd check read-only
+  capacity warning, the mixed and hosted refusals, the generated 04), and the etcd check read-only
   against a real single-node cluster. Not yet on a real compact cluster: the first run there is
   the test, and NHC's behavior with a truly dead master is still to be measured.
 - **What I tested:** every check by hand on Dell iDRAC hardware (the preflight). The script ran

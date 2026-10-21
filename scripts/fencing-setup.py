@@ -899,10 +899,11 @@ def check_capacity(oc, nodes, selected, rep, compact=False):
     free = sum(max(0, allocatable[n] - requested[n]) for n in selected if n != busiest)
     note = "(memory requests, counted in aggregate; not a scheduling simulation)"
     if movable[busiest] > free:
-        rep.add("FAIL" if compact else "WARN", "capacity", "losing %s means rescheduling %s, and the other %s "
-                "%s free: some VMs would stay Pending %s%s" % (
-                    busiest, gib(movable[busiest]), "masters have" if compact else "workers have", gib(free), note,
-                    ". With two nodes left, fencing would not bring them back." if compact else ""))
+        rep.add("WARN", "capacity", "losing %s means rescheduling %s, and the other %s %s free: about %s would "
+                "stay Pending until it is back %s. Fencing still brings back what fits (without it, nothing on "
+                "that node comes back). To decide which VMs fit, give the critical ones a higher "
+                "priorityClassName." % (busiest, gib(movable[busiest]), "masters have" if compact else "workers have",
+                                        gib(free), gib(movable[busiest] - free), note))
     else:
         rep.add("PASS", "capacity", "losing the busiest worker (%s) means rescheduling %s; the others have %s free %s"
                 % (busiest, gib(movable[busiest]), gib(free), note))
@@ -1122,16 +1123,26 @@ def check_identity(conf, nodes, dmi, results, rep):
     serial_count = collections.Counter(norm(d.get("product_serial")) for d in dmi.values() if "error" not in d)
     proven = []
     by_bmc = collections.defaultdict(list)
+    bmc_serial = {r["node"]: norm(r.get("SerialNumber")) for r in results if r.get("status") == 200}
     for r in results:
         if r.get("status") != 200:
             continue
-        for key in ("SKU", "UUID"):
-            if norm(r.get(key)) and not (key == "UUID" and norm(r.get(key)) in PLACEHOLDER_UUIDS):
-                by_bmc[(key, norm(r.get(key)))].append(r["node"])
+        for key in ("SKU", "SerialNumber", "UUID"):
+            value = norm(r.get(key))
+            if not value or (value in PLACEHOLDER_UUIDS if key == "UUID" else placeholder_serial(value)):
+                continue
+            by_bmc[(key, value)].append(r["node"])
     for (key, value), owners in sorted(by_bmc.items()):
-        if len(owners) > 1:
-            rep.add("FAIL", "identity", "BMCs of %s report the same %s %s: two entries point at one server"
-                    % (short_list(owners), key, value.upper()))
+        if len(owners) < 2:
+            continue
+        serials = [bmc_serial.get(o) for o in owners]
+        if key == "SKU" and all(serials) and len(set(serials)) == len(serials) \
+                and not any(placeholder_serial(x) for x in serials):
+            # Dell keeps the service tag in SKU; Lenovo keeps the machine type-model there, shared by
+            # every server of that model. Distinct serial numbers tell these servers apart.
+            continue
+        rep.add("FAIL", "identity", "BMCs of %s report the same %s %s: two entries point at one server"
+                % (short_list(owners), key, value.upper()))
     for r in results:
         if r.get("status") != 200 or r["node"] not in nodes:
             continue
