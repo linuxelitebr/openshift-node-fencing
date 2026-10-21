@@ -93,6 +93,20 @@ an update, its `status.phase` still says `Enabled`; the sign is an event:
 oc get events -n default --field-selector reason=RemediationSkipped
 ```
 
+## Hosting (management) clusters
+
+Fencing the hosting cluster of hosted control planes is a different job (its masters are real
+etcd members, and the hosted etcd volumes live on its nodes); the method is still being measured.
+One piece works on its own today: [`manifests/hosting-etcd-alerts.yaml`](manifests/hosting-etcd-alerts.yaml)
+alerts when the etcd of any hosted cluster runs short of replicas (degraded after 10 minutes,
+quorum lost after 2). Apply it on the hosting cluster as is: it brings its own namespace,
+labeled so the platform Prometheus evaluates it. Under user workload monitoring the same rule
+would only see its own namespace and never fire.
+
+```bash
+oc apply -f manifests/hosting-etcd-alerts.yaml
+```
+
 ## The lab files
 
 These reproduce the experiments in the post. They are not part of the production setup.

@@ -1,0 +1,79 @@
+# Hosting (management) clusters only: alert when the etcd of a hosted cluster runs short of
+# replicas.
+#
+# With controllerAvailabilityPolicy HighlyAvailable, each hosted cluster runs 3 etcd replicas on
+# 3 different nodes of the hosting cluster. Losing one leaves it at 2 of 3: the hosted API stays
+# up, nobody notices, and the next failure takes its quorum. When several hosted clusters keep
+# their replicas on the same nodes, that next failure takes all of them at once. Fencing a dead
+# node usually brings the replica back within minutes; when it does not (a BMC that does not
+# answer, a volume that does not let go), this alert is how anyone finds out.
+#
+#   HostedClusterEtcdDegraded       fewer ready replicas than wanted, for 10 minutes (warning)
+#   HostedClusterEtcdQuorumLost     no majority of ready replicas, for 2 minutes (critical)
+#
+# The 10 minutes ride out the normal cases where a replica restarts on purpose: a hosted cluster
+# update rolls etcd one replica at a time, and a fence or a drill moves one.
+#
+# It only uses kube-state-metrics, which OpenShift already runs, and finds the hosted clusters by
+# the label HyperShift puts on every control plane namespace
+# (hypershift.openshift.io/hosted-control-plane=true), so nothing here names a hosted cluster.
+#
+# The rules MUST be evaluated by the platform Prometheus, which is why this file carries its own
+# namespace labeled openshift.io/cluster-monitoring=true. User workload monitoring only lets a rule
+# see the metrics of its own namespace: the same rule in an ordinary namespace is evaluated, comes
+# back empty, and never fires. Measured, not assumed. Deleting this file deletes only that
+# namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hosted-etcd-alerts
+  labels:
+    openshift.io/cluster-monitoring: "true"
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: hosted-etcd
+  namespace: hosted-etcd-alerts
+spec:
+  groups:
+    - name: hosted-etcd
+      rules:
+        - alert: HostedClusterEtcdDegraded
+          expr: |
+            (
+              kube_statefulset_status_replicas_ready{job="kube-state-metrics",statefulset="etcd"}
+                < kube_statefulset_replicas{job="kube-state-metrics",statefulset="etcd"}
+            )
+            * on (namespace) group_left ()
+            (kube_namespace_labels{job="kube-state-metrics",label_hypershift_openshift_io_hosted_control_plane="true"} > 0)
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Hosted cluster etcd short of replicas: {{ $labels.namespace }}"
+            description: >-
+              The etcd of the hosted control plane in {{ $labels.namespace }} has had only
+              {{ $value }} ready replicas, fewer than it wants, for 10 minutes. Its API is still up,
+              but one more failure takes its quorum. See where the replicas are and why one is not
+              ready: `oc get pods -n {{ $labels.namespace }} -l app=etcd -o wide`. A replica stuck
+              Pending on a dead node needs that node fenced or powered back on; one stuck on its
+              volume needs the storage side checked.
+        - alert: HostedClusterEtcdQuorumLost
+          expr: |
+            (
+              kube_statefulset_status_replicas_ready{job="kube-state-metrics",statefulset="etcd"}
+                < floor(kube_statefulset_replicas{job="kube-state-metrics",statefulset="etcd"} / 2) + 1
+            )
+            * on (namespace) group_left ()
+            (kube_namespace_labels{job="kube-state-metrics",label_hypershift_openshift_io_hosted_control_plane="true"} > 0)
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Hosted cluster etcd lost its quorum: {{ $labels.namespace }}"
+            description: >-
+              The etcd of the hosted control plane in {{ $labels.namespace }} has {{ $value }} ready
+              replicas, not a majority. The hosted cluster API is down or read-only. Bring the
+              nodes back first; if the replicas cannot come back, this is the etcd restore
+              procedure for hosted clusters.
