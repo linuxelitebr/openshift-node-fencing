@@ -44,6 +44,7 @@ NS = "openshift-workload-availability"
 SECRET = "fence-agents-credentials-shared"
 TEMPLATE = "fartemplate-redfish"
 NHC_NAME = "nhc-workers-far"
+NHC_MASTERS = "nhc-masters-far"
 FAR_DEPLOY = "fence-agents-remediation-controller-manager"
 FAR_POD_SELECTOR = "app.kubernetes.io/name=fence-agents-remediation-operator"
 WORKER_LABEL = "node-role.kubernetes.io/worker"
@@ -608,9 +609,21 @@ def check_nodes(conf, nodes, rep, facts):
                 "remediate any node with that label. The label is cosmetic on these workers: remove it."
                 % (short_list(cp_workers), verb))
     elif cp_workers and dedicated:
-        rep.add("FAIL", "nodes", "%s %s a control-plane or master label next to dedicated workers (%s). That mix "
-                "needs two health checks (workers without the masters, and the masters on their own), which "
-                "this script does not generate yet." % (short_list(cp_workers), verb, short_list(dedicated)))
+        facts["mixed"] = True
+        facts["masters"], facts["workers"] = cp_workers, dedicated
+        if not conf.allow_control_plane:
+            rep.add("FAIL", "nodes", "%s %s a control-plane or master label and also %s workloads, next to dedicated "
+                    "workers (%s). Fencing them powers off etcd members. The script can handle it with two health "
+                    "checks (the workers without the masters, and the masters on their own, one at a time behind the "
+                    "etcd quorum guard), but it is a decision, not a default: set allow_control_plane = true in [nhc] "
+                    "once you accept it (docs/setup-script.md)." % (short_list(cp_workers), verb,
+                                                                     "runs" if len(cp_workers) == 1 else "run",
+                                                                     short_list(dedicated)))
+        else:
+            rep.add("WARN", "nodes", "masters that run workloads (%s) next to dedicated workers (%s): two health "
+                    "checks, %s for the workers and %s for the masters (one at a time, etcd quorum guard). Fencing "
+                    "a master leaves etcd at 2 of 3 until it is back on." % (short_list(cp_workers),
+                                                                          short_list(dedicated), NHC_NAME, NHC_MASTERS))
     elif cp_workers:
         facts["compact"] = True
         if not conf.allow_control_plane:
@@ -635,7 +648,9 @@ def check_nodes(conf, nodes, rep, facts):
                 "them: %s" % short_list(extra))
     if not unknown and not missing:
         rep.add("PASS", "nodes", "%s selected by the health check (label %s), all in the config"
-                % (plural(len(selected), "master" if facts.get("compact") else "worker"), WORKER_LABEL))
+                % ("%s and %s" % (plural(len(facts["masters"]), "master"), plural(len(facts["workers"]), "worker"))
+                   if facts.get("mixed") else plural(len(selected), "master" if facts.get("compact") else "worker"),
+                   WORKER_LABEL))
     not_ready = [n for n in conf.nodes if n in nodes and not is_ready(nodes[n])]
     if not_ready:
         rep.add("WARN", "nodes", "not Ready now: %s. Once the health check is armed, a node NotReady for the "
@@ -733,6 +748,30 @@ def check_etcd_guard(oc, nodes, rep):
                                                   plural(len(masters), "master")))
 
 
+def check_hosting(oc, nodes, rep):
+    """On a hosting cluster of hosted control planes, say what fencing each node means for them."""
+    hcps, err = oc.get(["hostedcontrolplanes.hypershift.openshift.io", "-A"])
+    if hcps is None or not hcps.get("items"):
+        return
+    pods, err = oc.get(["pods", "-A", "-l", "hypershift.openshift.io/control-plane-component=etcd"])
+    if pods is None:
+        rep.add("WARN", "hosting", "cannot list the hosted etcd pods: %s" % err)
+        return
+    per_node = collections.defaultdict(set)
+    for p in pods.get("items", []):
+        node = (p.get("spec") or {}).get("nodeName")
+        if node:
+            per_node[node].add(p["metadata"]["namespace"])
+    total = len(hcps["items"])
+    loaded = sorted(((len(v), n) for n, v in per_node.items()), reverse=True)
+    empty = sorted(n for n in nodes if n not in per_node)
+    rep.add("INFO", "hosting", "hosting cluster of %s. Hosted etcd replicas per node: %s%s. Fencing one of these "
+            "nodes leaves that many hosted clusters at 2 of 3 until the replica comes back; "
+            "manifests/hosting-etcd-alerts.yaml alerts when one stays short." % (
+                plural(total, "hosted cluster"), ", ".join("%s %d" % (n, c) for c, n in loaded) or "none",
+                "; none on %s" % short_list(empty) if empty else ""))
+
+
 def selector_matches(selector, node_labels):
     if not selector:
         return True
@@ -760,8 +799,8 @@ def check_conflicts(oc, conf, nodes, selected, rep):
         rep.add("WARN", "conflicts", "cannot list NodeHealthChecks: %s" % err)
     for nhc in (nhcs or {}).get("items", []):
         name, spec = nhc["metadata"]["name"], nhc.get("spec") or {}
-        if name == NHC_NAME:
-            ours = "paused" if spec.get("pauseRequests") else "armed"
+        if name in (NHC_NAME, NHC_MASTERS):
+            ours = "paused" if spec.get("pauseRequests") or ours == "paused" else "armed"
             if spec.get("pauseRequests"):
                 rep.add("WARN", "conflicts", "NodeHealthCheck %s is paused (pauseRequests: %s): nothing is fenced "
                         "automatically until it is resumed (README)" % (name, ", ".join(spec["pauseRequests"])))
@@ -770,7 +809,7 @@ def check_conflicts(oc, conf, nodes, selected, rep):
             continue
         tmpl = spec.get("remediationTemplate") or {}
         what = "%s %s" % (tmpl.get("kind"), tmpl.get("name")) if tmpl else "escalating remediations"
-        if name == NHC_NAME:
+        if name in (NHC_NAME, NHC_MASTERS):
             rep.add("INFO", "conflicts", "NodeHealthCheck %s already exists and is %s (remediation: %s); applying "
                     "the generated 04 updates it" % (name, ours.upper(), what))
         else:
@@ -1393,6 +1432,54 @@ def render_drill(conf, node, stamp):
     return "\n".join(head + far_spec_lines(conf, [(node, conf.nodes[node])], 2)) + "\n"
 
 
+def nhc_doc(name, expressions, field, value, duration):
+    lines = ["apiVersion: remediation.medik8s.io/v1alpha1",
+             "kind: NodeHealthCheck",
+             "metadata:",
+             "  name: %s" % name,
+             "spec:",
+             "  selector:",
+             "    matchExpressions:"]
+    for key, op in expressions:
+        lines += ["      - key: %s" % key, "        operator: %s" % op]
+    lines += ["  %s: %s" % (field, value),
+              "  unhealthyConditions:",
+              "    - type: Ready",
+              '      status: "False"',
+              "      duration: %s" % duration,
+              "    - type: Ready",
+              "      status: Unknown",
+              "      duration: %s" % duration,
+              "  remediationTemplate:",
+              "    apiVersion: fence-agents-remediation.medik8s.io/v1alpha1",
+              "    kind: FenceAgentsRemediationTemplate",
+              "    name: %s" % TEMPLATE,
+              "    namespace: %s" % NS]
+    return lines
+
+
+def render_nhc_mixed(conf, workers, masters, stamp):
+    key, n, pct = conf.threshold
+    allowed, _ = allowed_unhealthy(conf.threshold, workers)
+    field = "minHealthy" if key == "min_healthy" else "maxUnhealthy"
+    value = '"%d%%"' % n if pct else str(n)
+    head = ["# ARMS automatic fencing. Apply it LAST, after drilling a worker AND a master (03): from then on",
+            "# a node NotReady for %s is powered off by its BMC." % conf.duration,
+            "# %s" % stamp,
+            "# Two health checks, so the masters get their own rules:",
+            "#   %s: %s, %s: %s lets NHC fence at most %d at a time." % (
+                NHC_NAME, plural(workers, "dedicated worker"), field, value, allowed),
+            "#   %s: %s, maxUnhealthy 1. NHC fences one master at a time, and only when the etcd quorum" % (
+                NHC_MASTERS, plural(masters, "master")),
+            "#   guard shows that master's etcd is already out (a live etcd is never powered off).",
+            "# The selectors do not overlap: a master that also runs workloads is only in the second one."]
+    workers_doc = nhc_doc(NHC_NAME, [(WORKER_LABEL, "Exists"), ("node-role.kubernetes.io/control-plane", "DoesNotExist"),
+                                     ("node-role.kubernetes.io/master", "DoesNotExist")], field, value, conf.duration)
+    masters_doc = nhc_doc(NHC_MASTERS, [("node-role.kubernetes.io/control-plane", "Exists")], "maxUnhealthy", "1",
+                          conf.duration)
+    return "\n".join(head + workers_doc + ["---"] + masters_doc) + "\n"
+
+
 def render_nhc(conf, total, stamp, compact=False):
     key, n, pct = conf.threshold
     allowed, _ = allowed_unhealthy(conf.threshold, total)
@@ -1487,7 +1574,10 @@ def generate(oc, conf, selected, run_dir, stamp, rep, facts):
             "%s is missing or was changed by hand" % os.path.normpath(HEALTHCHECK_MANIFEST)))
     for node in nodes_in:
         files["03-drill-%s.yaml" % node] = render_drill(conf, node, stamp)
-    files["04-nodehealthcheck.yaml"] = render_nhc(conf, len(selected), stamp, bool(facts.get("compact")))
+    if facts.get("mixed"):
+        files["04-nodehealthcheck.yaml"] = render_nhc_mixed(conf, len(facts["workers"]), len(facts["masters"]), stamp)
+    else:
+        files["04-nodehealthcheck.yaml"] = render_nhc(conf, len(selected), stamp, bool(facts.get("compact")))
     parent = os.path.dirname(os.path.abspath(run_dir))
     os.makedirs(parent, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix=".fencing-", dir=parent)
@@ -1579,9 +1669,14 @@ def main(argv=None):
         nodes = collections.OrderedDict((n["metadata"]["name"], n) for n in nodes_json.get("items", []))
     selected = check_nodes(conf, nodes, rep, facts)
     compact = bool(facts.get("compact"))
-    check_threshold(conf, selected, rep, compact)
-    if compact:
+    if facts.get("mixed"):
+        check_threshold(conf, facts["workers"], rep)
+        rep.add("INFO", "nhc", "masters: their own health check, maxUnhealthy 1 (fixed), the etcd quorum guard decides")
+    else:
+        check_threshold(conf, selected, rep, compact)
+    if compact or facts.get("mixed"):
         check_etcd_guard(oc, nodes, rep)
+    check_hosting(oc, nodes, rep)
     nhc_state = check_conflicts(oc, conf, nodes, selected, rep)
     check_vms(oc, rep)
     check_capacity(oc, nodes, selected, rep, compact)
@@ -1681,6 +1776,9 @@ def main(argv=None):
         if facts.get("compact"):
             rep.say("     compact cluster: the drill powers off a master, and etcd runs at 2 of 3 until it is back")
             rep.say("     on. Make sure someone can power it on remotely first (docs/preflight.md section 11).")
+        if facts.get("mixed"):
+            rep.say("     masters next to workers: drill a dedicated worker first, then a master (etcd at 2 of 3")
+            rep.say("     until it is back on). 04 holds two health checks; pause both during each drill.")
         if nhc_state == "armed":
             rep.say("     %s is ARMED: pause it before the drill and resume it after (README, pauseRequests)," % NHC_NAME)
             rep.say("     or it starts its own remediation of the node you powered off")

@@ -50,7 +50,8 @@ Without it, the script reminds you to check `autoRepair` by hand (preflight sect
 | `operators` | NHC and FAR from `redhat-operators`, `Succeeded`, one OperatorGroup; Self Node Remediation present | 3 |
 | `monitoring` | something evaluates the `05` alert rules: user workload monitoring enabled, or the namespace labeled `openshift.io/cluster-monitoring=true` | |
 | `nodes` | every worker the health check selects has a BMC in the config; no `control-plane` or `master` label, except on a compact cluster with `allow_control_plane = true`; NotReady nodes; leftover fencing taints | 1 |
-| `etcd` | compact clusters only: exactly one etcd quorum guard PDB in `openshift-etcd`, and its guard pod Ready on every master | |
+| `hosting` | on a hosting cluster of hosted control planes: how many hosted etcd replicas each node holds, that is, how many hosted clusters drop to 2 of 3 if it is fenced | |
+| `etcd` | compact clusters and masters next to workers: exactly one etcd quorum guard PDB in `openshift-etcd`, and its guard pod Ready on every master | |
 | `nhc` | how many nodes the threshold lets NHC fence at once, rounded the way NHC rounds; the duration | |
 | `conflicts` | other NodeHealthChecks or MachineHealthChecks over these workers; BareMetalHosts holding these BMCs; leftover FAR CRs | 2 |
 | `vms` | running VMs whose `runStrategy` keeps them down after a fence | 5 |
@@ -151,8 +152,12 @@ and failed, and no alert fired, because nothing was evaluating the rules.
   the etcd quorum guard shows that master's etcd already out. Then the script also requires the
   quorum guard PDB and a Ready guard pod on every master. It warns when the other two nodes lack
   the memory for the busiest one's VMs: the fence still brings back what fits, and without it
-  nothing on that node comes back, so that is a WARN with the numbers, not a reason to refuse. Masters running workloads next to dedicated workers (two health
-  checks needed) are refused, and so are control-plane labels on hosted-cluster workers.
+  nothing on that node comes back, so that is a WARN with the numbers, not a reason to refuse. Masters running workloads next to dedicated workers (a hosting
+  cluster, typically) take the same `allow_control_plane = true`, and then 04 holds two health
+  checks with selectors that do not overlap: `nhc-workers-far` for the dedicated workers (your
+  threshold) and `nhc-masters-far` for the masters (maxUnhealthy 1, etcd quorum guard). Drill a
+  worker and a master before you arm them. Control-plane labels on hosted-cluster workers are
+  refused.
 - **IPv4 BMC addresses or host names.** IPv6 is not handled, and a host name gets a warning:
   fencing then depends on DNS during an incident.
 - **Reading the node's serial needs `oc debug node`**, which runs a privileged pod on each node.
