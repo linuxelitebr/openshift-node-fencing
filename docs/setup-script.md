@@ -134,8 +134,10 @@ and failed, and no alert fired, because nothing was evaluating the rules.
 
 ## Limits
 
-- **Dell first.** The default `systems_uri` is the iDRAC one, and the identity check knows that
-  Dell keeps the service tag in `SKU`. For other Redfish BMCs, set `systems_uri`; the serial is
+- **Dell first, Lenovo XCC read.** The default `systems_uri` is the iDRAC one, and the identity
+  check knows that Dell keeps the service tag in `SKU`. A Lenovo XClarity Controller uses
+  `/redfish/v1/Systems/1` and keeps the serial in `SerialNumber` (read from a real XCC; preflight
+  section 7 shows how to find the path on yours). For other Redfish BMCs, set `systems_uri`; the serial is
   compared with both `SKU` and `SerialNumber`.
 - **One BMC account for all nodes** (`sharedSecretName`). Per-node credentials
   (`nodeSecretNames`) are not handled.

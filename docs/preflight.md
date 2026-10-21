@@ -172,6 +172,55 @@ for p in $(oc get pod -n openshift-workload-availability -l app.kubernetes.io/na
 
 Every line must end in `http=200`. `000` means no connection from that node.
 
+**Find the `systems_uri` of your BMCs.** It is the Redfish path of the server behind the BMC, and
+it changes by vendor: `/redfish/v1/Systems/System.Embedded.1` on a Dell iDRAC,
+`/redfish/v1/Systems/1` on a Lenovo XClarity Controller. Every command in this repo that sets
+`systems_uri` uses the Dell value; replace it if yours differs. Read it from one BMC, read-only
+(replace the IP and the account):
+
+```bash
+read -rs -p 'BMC password: ' P; echo; printf '%s\n' "$P" | oc exec -i -n openshift-workload-availability deploy/fence-agents-remediation-controller-manager -c manager -- python3 -c '
+import sys,requests,urllib3
+urllib3.disable_warnings()
+pw=sys.stdin.readline().strip(); ip="10.10.0.10"; user="fencing"
+s=requests.Session(); s.trust_env=False; s.auth=(user,pw); s.verify=False; s.headers.update({"accept":"application/json","OData-Version":"4.0"})
+g=lambda p: s.get("https://%s%s"%(ip,p),timeout=(5,25)).json()
+r=g("/redfish/v1/"); print("product:", r.get("Product"), "| redfish", r.get("RedfishVersion"))
+for m in g("/redfish/v1/Systems").get("Members",[]):
+  j=g(m["@odata.id"]); a=j.get("Actions",{}).get("#ComputerSystem.Reset",{})
+  print("systems_uri:", m["@odata.id"], "| SKU", j.get("SKU"), "| SerialNumber", j.get("SerialNumber"), "| Power", j.get("PowerState"))
+  print("  server reset types:", a.get("ResetType@Redfish.AllowableValues"))
+for m in g("/redfish/v1/Managers").get("Members",[]):
+  a=g(m["@odata.id"]).get("Actions",{}).get("#Manager.Reset",{})
+  print("manager:", m["@odata.id"], "| BMC reset:", a.get("target"), a.get("ResetType@Redfish.AllowableValues"))
+'; unset P
+```
+
+From a Lenovo XCC:
+
+```
+product: None | redfish 1.15.0
+systems_uri: /redfish/v1/Systems/1 | SKU 7Z71CTO1WW | SerialNumber J0000AAA | Power On
+  server reset types: ['On', 'Nmi', 'GracefulShutdown', 'GracefulRestart', 'ForceOn', 'ForceOff', 'ForceRestart']
+manager: /redfish/v1/Managers/1 | BMC reset: /redfish/v1/Managers/1/Actions/Manager.Reset ['GracefulRestart', 'ForceRestart']
+```
+
+(`product: None` is normal on an XCC: `Product` is optional in Redfish.)
+
+What to take from it:
+
+- the `systems_uri` line is the value for `[bmc] systems_uri` in `fencing.conf`, and for every
+  command here that sets it
+- the server reset types must include `ForceOff` and `On`: that is what the fence and the
+  power-on send
+- the serial: Dell keeps the service tag in `SKU`, Lenovo in `SerialNumber` (its `SKU` is the
+  machine type-model). The identity check in section 8 compares the node's serial with both
+- the BMC reset line tells whether the automatic BMC reboot of the health check
+  ([bmc-healthcheck.md](bmc-healthcheck.md)) can work on this BMC
+
+The same path on every node is the normal case for one vendor. `fencing-setup.py` also lists the
+systems a BMC offers when the configured path answers 404.
+
 ## 8. Map every node to its BMC by service tag
 
 This is the check that keeps FAR from powering off a healthy node. The `status` action proves a
