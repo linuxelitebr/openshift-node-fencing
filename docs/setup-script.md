@@ -49,7 +49,8 @@ Without it, the script reminds you to check `autoRepair` by hand (preflight sect
 | `cluster` | OpenShift 4.15 or later; single-node refused; hosted cluster noted; update in progress | 1 |
 | `operators` | NHC and FAR from `redhat-operators`, `Succeeded`, one OperatorGroup; Self Node Remediation present | 3 |
 | `monitoring` | something evaluates the `05` alert rules: user workload monitoring enabled, or the namespace labeled `openshift.io/cluster-monitoring=true` | |
-| `nodes` | every worker the health check selects has a BMC in the config; none carries a `control-plane` or `master` label; NotReady nodes; leftover fencing taints | 1 |
+| `nodes` | every worker the health check selects has a BMC in the config; no `control-plane` or `master` label, except on a compact cluster with `allow_control_plane = true`; NotReady nodes; leftover fencing taints | 1 |
+| `etcd` | compact clusters only: exactly one etcd quorum guard PDB in `openshift-etcd`, and its guard pod Ready on every master | |
 | `nhc` | how many nodes the threshold lets NHC fence at once, rounded the way NHC rounds; the duration | |
 | `conflicts` | other NodeHealthChecks or MachineHealthChecks over these workers; BareMetalHosts holding these BMCs; leftover FAR CRs | 2 |
 | `vms` | running VMs whose `runStrategy` keeps them down after a fence | 5 |
@@ -138,7 +139,14 @@ and failed, and no alert fired, because nothing was evaluating the rules.
   compared with both `SKU` and `SerialNumber`.
 - **One BMC account for all nodes** (`sharedSecretName`). Per-node credentials
   (`nodeSecretNames`) are not handled.
-- **Dedicated workers only.** Single-node and compact clusters are refused.
+- **Dedicated workers, or a compact cluster on purpose.** Single-node is refused. A compact
+  cluster (three nodes, all masters running workloads) is refused until `[nhc]` says
+  `allow_control_plane = true` with `max_unhealthy = 1`: every fence there powers off an etcd
+  member, and that is a decision, not a default. NHC fences one master at a time and only when
+  the etcd quorum guard shows that master's etcd already out. Then the script also requires the
+  quorum guard PDB, a Ready guard pod on every master, and enough memory on the other two nodes
+  (a FAIL there, not a WARN). Masters running workloads next to dedicated workers (two health
+  checks needed) are refused, and so are control-plane labels on hosted-cluster workers.
 - **IPv4 BMC addresses or host names.** IPv6 is not handled, and a host name gets a warning:
   fencing then depends on DNS during an incident.
 - **Reading the node's serial needs `oc debug node`**, which runs a privileged pod on each node.
@@ -147,6 +155,11 @@ and failed, and no alert fired, because nothing was evaluating the rules.
   may run on another worker.
 - **FAR 0.6.0 or later.** Older versions accept `--action off` in the template and reject it only
   when they fence; the script fails on them.
+- **Compact mode, what I tested:** every case with a fake `oc` (compact with and without
+  `allow_control_plane`, each threshold, no PDB, two PDBs, a guard pod not Ready or missing, the
+  capacity FAIL, the mixed and hosted refusals, the generated 04), and the etcd check read-only
+  against a real single-node cluster. Not yet on a real compact cluster: the first run there is
+  the test, and NHC's behavior with a truly dead master is still to be measured.
 - **What I tested:** every check by hand on Dell iDRAC hardware (the preflight). The script ran
   against a customer's hosted cluster with three Dell PowerEdge workers (iDRAC 9) on OpenShift
   4.20 with NHC 0.10.3 and FAR 0.6.1: 22 PASS, every service tag matched. In my lab it ran on
