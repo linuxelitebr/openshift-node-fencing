@@ -38,7 +38,7 @@ anything. Every step has a gate; do not move on until it passes.
 
 | Step | What | Gate |
 | --- | --- | --- |
-| 0 | [`docs/preflight.md`](docs/preflight.md) sections 1 to 9, or the setup script below | every check as described there |
+| 0 | [`docs/preflight.md`](docs/preflight.md) sections 1 to 9, or the setup script below; at a remote site, also section 11 | every check as described there; at a remote site, someone can power a node back on and log in on its console without the network |
 | 1 | `manifests/01-operators.yaml`, or OperatorHub (pick the tiles marked **Red Hat**) | CSVs `Succeeded`, subscriptions from `redhat-operators` |
 | 2 | Secret ([preflight 10](docs/preflight.md#10-create-the-credential-secret-then-test-what-is-inside-it)), then `manifests/02-fartemplate-redfish.yaml` | no empty Secret value; `status` with the Secret's own values says `ON` |
 | 2b | BMC health check: [`docs/bmc-healthcheck.md`](docs/bmc-healthcheck.md) with `manifests/05-bmc-healthcheck.yaml`; without user workload monitoring, also `oc label namespace openshift-workload-availability openshift.io/cluster-monitoring=true` | one run logs `SUMMARY ... failed=0`; the three `FencingBMC` rules are loaded |

@@ -1,6 +1,7 @@
 # Preflight: prove the fence path before you arm anything
 
-Everything here is read-only except section 10, which creates the credential Secret. Run it top
+Everything here is read-only except section 10, which creates the credential Secret, and section
+11, which is a checklist for remote sites. Run it top
 to bottom before applying `manifests/02-*`. Each section says what you should see; if you see
 something else, stop and fix it, because every item below is a way fencing fails silently on the
 day you need it.
@@ -298,6 +299,39 @@ read -rs -p 'vCenter password: ' P; echo; if [ -z "$P" ]; then echo 'ERROR: empt
 On vSphere 8, keep `api_path=/rest`. fence-agents 4.10 misreads the newer `/api` session reply
 and fails with `Failed: 'value'` even though the login worked. If a vCenter login "stops working"
 after a few tries, suspect the account lockout before the password.
+
+## 11. Remote sites: make sure someone can get back in
+
+FAR with `--action off` leaves the fenced node off on purpose. In a datacenter someone walks to
+the rack. At a remote site nobody does, and a three-node cluster runs on two nodes, with etcd at
+2 of 3, until someone powers the third one back on from far away. Settle these before the drill,
+and write down who does each one:
+
+**1. The people who will power the node back on can reach its BMC.** Not the FAR pod: them, from
+wherever they work (VPN, jump host). Open the BMC web UI of every node and log in with the
+account they will use. Section 7 proves the cluster reaches the BMCs; this proves the humans do.
+
+**2. Power-on works from there.** The drill (`docs/drill.md`, step 6) is the first real test: the
+node you power off is powered back on remotely, by the people who would do it at 3 a.m. Do not
+skip that part of the drill, and time it.
+
+**3. You can log in on the node's console without the network.** A node can be up with its
+network broken: SSH and `oc debug` are useless then, and the BMC virtual console is the only way
+in. By default the `core` user has no password and logs in with an SSH key only, so the console
+shows a login prompt nobody can pass. Set a password for `core` with a MachineConfig
+(`passwd.users`, `passwordHash`) for every pool, keep it in the team's vault as a break-glass
+credential, and then log in on the virtual console of each node to prove it works:
+
+- it only works on the console (BMC or serial), never over SSH
+- the Machine Config Operator does not check the hash: a wrong hash fails silently, and you find
+  out at the console prompt
+- check on your OpenShift version whether applying it drains and reboots nodes before you apply
+  it; on a three-node cluster that means every master, one at a time
+- the procedure is in the OpenShift documentation, Machine configuration, "changing the core user
+  password"
+
+**4. The alerts reach the people from point 1.** `FencingBMCHealthCheckFailing` and a fence that
+happened are worth nothing at 3 a.m. if they land in a mailbox nobody reads.
 
 ## Powering a node back on
 
