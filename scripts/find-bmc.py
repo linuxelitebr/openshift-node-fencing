@@ -96,9 +96,13 @@ with ThreadPoolExecutor(max_workers=cfg["parallel"]) as ex:
     found = [b for b in ex.map(root, cfg["hosts"]) if b]
 KNOWN = ("dell", "idrac", "lenovo", "xclarity")
 bmcs = [b for b in found if cfg["any_vendor"] or any(k in b["vendor"].lower() for k in KNOWN)]
+skipped = {}
+for b in found:
+    if b not in bmcs:
+        skipped[b["product"]] = skipped.get(b["product"], 0) + 1
 with ThreadPoolExecutor(max_workers=min(8, len(bmcs) or 1)) as ex:
     bmcs = list(ex.map(systems, bmcs))
-print(json.dumps({"answered": len(found), "bmcs": bmcs}))
+print(json.dumps({"answered": len(found), "bmcs": bmcs, "skipped": skipped}))
 '''
 
 
@@ -203,7 +207,12 @@ def main(argv=None):
         for srv in b.get("servers") or [None]:
             tag = b.get("tag") or (srv or {}).get("SKU") or (srv or {}).get("SerialNumber")
             rows.append((b, srv, tag))
-    print("\n%d addresses answered Redfish, %d BMCs kept\n" % (result["answered"], len(bmcs)))
+    print("\n%d addresses answered Redfish, %d BMCs kept" % (result["answered"], len(bmcs)))
+    skipped = result.get("skipped") or {}
+    if skipped:
+        print("not kept, no login tried (not Dell or Lenovo): %s. --any-vendor keeps them." % ", ".join(
+            "%d x %s" % (n, prod) for prod, n in sorted(skipped.items(), key=lambda kv: -kv[1])))
+    print("")
     print("%-15s %-12s %-20s %-28s %s" % ("BMC", "SERIAL", "SERVER", "HOSTNAME (from the BMC)", "NOTE"))
     want = norm(args.service_tag)
     hits = []
