@@ -14,7 +14,11 @@ places: in the node's firmware and in its BMC. `scripts/find-bmc.py` sweeps the 
 Redfish, reads the serial behind each BMC it finds, and tells you which one matches.
 
 The one-liner this script grew from found the iDRAC of exactly such a node at a customer. The
-script itself was tested against the lab stub (below), not yet on a real BMC network.
+script then ran on a real customer BMC network: in one /24 it kept the Dell iDRACs, skipped
+the HPE iLOs without a login, and mapped every node of a cluster by serial, after an inventory
+spreadsheet had pointed those nodes at the iDRACs of another cluster's servers. The iDRACs still
+showed the host names of the system the servers ran before, which is why the serial is what
+counts.
 
 ## What it does
 
@@ -54,6 +58,7 @@ The output looks like this (example addresses and serials):
 
 ```
 10 addresses answered Redfish, 8 BMCs kept
+not kept, no login tried (not Dell or Lenovo): 2 x ProLiant DL380 Gen10. --any-vendor keeps them.
 
 BMC             SERIAL       SERVER               HOSTNAME (from the BMC)      NOTE
 10.10.0.10      ABC1230      PowerEdge R650       worker-0.example.com
